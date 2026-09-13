@@ -33,6 +33,7 @@ public class ShopManager : MonoBehaviour
         var pool = new List<(AdditiveData data, float weight)>();
         foreach (var a in additivePool)
         {
+            if (a == null) continue; // skip empty/unassigned slots in the Inspector list
             float w = BaseWeight(a.rarity);
             if (a.rarity != Rarity.Common) w *= skew; // only rarer tiers benefit from the skew
             pool.Add((a, w));

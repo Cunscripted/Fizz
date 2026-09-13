@@ -61,6 +61,12 @@ public class LerpPanel : MonoBehaviour
     {
         if (_routine != null) StopCoroutine(_routine);
         gameObject.SetActive(true);
+        if (!gameObject.activeInHierarchy)
+        {
+            Debug.LogWarning($"[LerpPanel] '{name}' Show() called but activeInHierarchy is still false after " +
+                              "SetActive(true) - a PARENT object is disabled, which will silently prevent this " +
+                              "panel (and its animation coroutine) from actually running.", this);
+        }
         _routine = StartCoroutine(Animate(true));
     }
 

@@ -159,6 +159,14 @@ public class ConveyorBelt : MonoBehaviour
         _cards.Remove(card);
     }
 
+    /// <summary>Destroys every card currently on the belt and clears the internal list - used when redrawing a fresh hand.</summary>
+    public void ClearAllCards()
+    {
+        foreach (var c in _cards)
+            if (c != null) Destroy(c.gameObject);
+        _cards.Clear();
+    }
+
     public IReadOnlyList<AdditiveCard> Cards => _cards;
 
     /// <summary>
