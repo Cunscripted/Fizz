@@ -23,6 +23,13 @@ public class ModifierOfferButton : MonoBehaviour
 
     public void SetData(ModifierData data)
     {
+        if (data == null)
+        {
+            Debug.LogError($"[ModifierOfferButton] '{name}' SetData() called with a null ModifierData - " +
+                            "check ModifierManager.modifierPool for an empty/unassigned slot.", this);
+            return;
+        }
+
         _data = data;
         if (nameText != null) nameText.text = data.modifierName;
         if (descriptionText != null) descriptionText.text = data.description;

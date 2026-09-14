@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using UnityEngine;
 
 /// <summary>
@@ -17,14 +18,24 @@ public class FlavorRule
 }
 
 /// <summary>
-/// Global bonus scaling with how many of a flavor sit on the BELT (not the cup)
-/// when scored. Added once per soda, not per cup additive.
+/// Global bonus scaling with how many additives matching ANY of `flavors` sit on
+/// the BELT (not the cup) when scored. Added once per soda, not per cup additive.
 /// </summary>
 public class FlavorScalingBonus
 {
-    public FlavorType flavor;
+    public List<FlavorType> flavors;
     public bool isMult;
     public float amountPerCount;
+}
+
+/// <summary>
+/// What ApplyModifier actually did, for a presentation layer (e.g. SyrupApplyPopup)
+/// to react to - which additive (if any) was gained or lost as part of this syrup.
+/// </summary>
+public struct ModifierApplyResult
+{
+    public AdditiveData addedAdditive;
+    public AdditiveData removedAdditive;
 }
 
 /// <summary>
@@ -47,13 +58,19 @@ public class ModifierManager : MonoBehaviour
     /// <summary>Fired for AddAttempt syrups; RoundManager subscribes to grow its attempt pool.</summary>
     public event Action<int> OnAttemptBonusGranted;
 
+    /// <summary>Fired for AddBeltSize syrups; RoundManager subscribes to grow how many cards it draws each round.</summary>
+    public event Action<int> OnBeltSizeBonusGranted;
+
     private readonly List<ModifierData> _active = new List<ModifierData>();
     private readonly List<FlavorRule> _flavorRules = new List<FlavorRule>();
     private readonly List<FlavorScalingBonus> _flavorScaling = new List<FlavorScalingBonus>();
 
     public List<ModifierData> GenerateOffers()
     {
-        var shuffled = new List<ModifierData>(modifierPool);
+        // Filter out empty/unassigned slots in modifierPool before shuffling - an
+        // Inspector list with a gap in it would otherwise hand a null straight to
+        // whatever UI spawns offer entries.
+        var shuffled = modifierPool.Where(m => m != null).ToList();
         for (int i = shuffled.Count - 1; i > 0; i--)
         {
             int j = UnityEngine.Random.Range(0, i + 1);
@@ -62,8 +79,9 @@ public class ModifierManager : MonoBehaviour
         return shuffled.GetRange(0, Mathf.Min(offerCount, shuffled.Count));
     }
 
-    public void ApplyModifier(ModifierData modifier, List<AdditiveInstance> ownedAdditives)
+    public ModifierApplyResult ApplyModifier(ModifierData modifier, List<AdditiveInstance> ownedAdditives, List<AdditiveData> allAdditivesPool = null)
     {
+        var result = new ModifierApplyResult();
         _active.Add(modifier);
 
         switch (modifier.effectType)
@@ -101,7 +119,7 @@ public class ModifierManager : MonoBehaviour
             case ModifierEffectType.ScalePerFlavorOnBelt:
                 _flavorScaling.Add(new FlavorScalingBonus
                 {
-                    flavor = modifier.targetFlavor,
+                    flavors = modifier.scalingFlavors,
                     isMult = modifier.scaleIsMult,
                     amountPerCount = modifier.amount
                 });
@@ -109,12 +127,59 @@ public class ModifierManager : MonoBehaviour
 
             case ModifierEffectType.AddAdditiveToDeck:
                 if (modifier.additiveToAdd != null)
+                {
                     ownedAdditives.Add(new AdditiveInstance(modifier.additiveToAdd));
+                    result.addedAdditive = modifier.additiveToAdd;
+                }
                 break;
+
+            case ModifierEffectType.AddRandomAdditiveToDeck:
+            {
+                var pick = RandomAdditivePicker.Pick(modifier.randomAdditivePool, modifier.filterByFlavor,
+                                                      modifier.targetFlavor, allAdditivesPool);
+                if (pick != null)
+                {
+                    ownedAdditives.Add(new AdditiveInstance(pick));
+                    result.addedAdditive = pick;
+                }
+                break;
+            }
+
+            case ModifierEffectType.RemoveAdditiveFromDeck:
+                if (modifier.additiveToRemove != null)
+                {
+                    var match = ownedAdditives.FirstOrDefault(a => a.template == modifier.additiveToRemove);
+                    if (match != null)
+                    {
+                        ownedAdditives.Remove(match);
+                        result.removedAdditive = modifier.additiveToRemove;
+                    }
+                }
+                break;
+
+            case ModifierEffectType.RemoveRandomAdditiveFromDeck:
+            {
+                var candidates = modifier.filterByFlavor
+                    ? ownedAdditives.Where(a => a.HasFlavor(modifier.targetFlavor)).ToList()
+                    : new List<AdditiveInstance>(ownedAdditives);
+                if (candidates.Count > 0)
+                {
+                    var pick = candidates[UnityEngine.Random.Range(0, candidates.Count)];
+                    ownedAdditives.Remove(pick);
+                    result.removedAdditive = pick.template;
+                }
+                break;
+            }
 
             case ModifierEffectType.AddAttempt:
                 OnAttemptBonusGranted?.Invoke(Mathf.Max(1, modifier.attemptBonus));
                 break;
+
+            case ModifierEffectType.AddBeltSize:
+                OnBeltSizeBonusGranted?.Invoke(Mathf.Max(1, modifier.beltSizeBonus));
+                break;
         }
+
+        return result;
     }
 }

@@ -15,8 +15,29 @@ public class ScoringContext
     public List<AdditiveInstance> ownedAdditives;
     public Dictionary<FlavorType, int> beltFlavorCounts;
 
+    /// <summary>
+    /// The actual additive instances currently on the belt (not the cup) - used by
+    /// PassiveOnBelt effects, which need to be scored directly rather than just counted
+    /// like beltFlavorCounts. A card in the cup is never also in this list, since it's
+    /// removed from the belt the moment it's accepted into the bottle.
+    /// </summary>
+    public List<AdditiveInstance> beltInstances;
+
+    /// <summary>
+    /// Every additive obtainable in the game (typically ShopManager.additivePool) - used as the
+    /// fallback search space when an AddRandomAdditiveToDeck effect filters by flavor but has no
+    /// curated pool of its own.
+    /// </summary>
+    public List<AdditiveData> allAdditivesPool;
+
     /// <summary>Invoked by AddAdditiveToDeck effects to permanently grow the owned collection.</summary>
     public Action<AdditiveData> addToDeck;
+
+    /// <summary>Invoked by DeleteCreatorThenSelf to permanently remove a specific instance from the owned collection.</summary>
+    public Action<AdditiveInstance> removeFromDeck;
+
+    /// <summary>Invoked by AddBeltSizePermanent to permanently grow how many additives are drawn each round.</summary>
+    public Action<int> addBeltSize;
 
     /// <summary>Maps an additive instance to its on-screen card, for spawning floating score text at the right spot.</summary>
     public Func<AdditiveInstance, RectTransform> resolveCardRect;

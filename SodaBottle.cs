@@ -1,6 +1,7 @@
 using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
+using UnityEngine.Events;
 
 /// <summary>
 /// Canvas UI version of the drop target. Attach to the SodaBottle's RectTransform.
@@ -30,6 +31,13 @@ public class SodaBottle : MonoBehaviour
     public bool Contains(AdditiveCard card) => _accepted.Contains(card);
     private readonly List<AdditiveCard> _accepted = new List<AdditiveCard>();
 
+    /// <summary>
+    /// Fires with the current cup contents any time an additive is added, removed,
+    /// or the bottle is cleared - lets anything (combo indicators, UI, etc.) react
+    /// to the cup live, not just SodaColorController.
+    /// </summary>
+    public UnityEvent<List<AdditiveInstance>> OnCupChanged;
+
     private void Awake()
     {
         if (dropZoneRect == null) dropZoneRect = GetComponent<RectTransform>();
@@ -56,7 +64,7 @@ public class SodaBottle : MonoBehaviour
         _accepted.Add(card);
         if (stackAnchor != null) card.Rect.SetParent(stackAnchor, worldPositionStays: true);
         StartCoroutine(SnapIntoStack(card, _accepted.Count - 1));
-        colorController?.UpdateCup(GetCupInstances());
+        NotifyCupChanged();
         return true;
     }
 
@@ -72,7 +80,7 @@ public class SodaBottle : MonoBehaviour
         if (_accepted.Remove(card))
         {
             RestackAll();
-            colorController?.UpdateCup(GetCupInstances());
+            NotifyCupChanged();
         }
     }
 
@@ -97,18 +105,38 @@ public class SodaBottle : MonoBehaviour
         foreach (var c in _accepted)
             belt?.AddCard(c);
         _accepted.Clear();
-        colorController?.UpdateCup(GetCupInstances());
+        NotifyCupChanged();
+    }
+
+    /// <summary>Destroys every accepted card outright instead of returning it to the belt - used when the whole hand is being redrawn from scratch.</summary>
+    public void ClearAndDestroy()
+    {
+        foreach (var c in _accepted)
+            if (c != null) Destroy(c.gameObject);
+        _accepted.Clear();
+        NotifyCupChanged();
+    }
+
+    private void NotifyCupChanged()
+    {
+        var cup = GetCupInstances();
+        colorController?.UpdateCup(cup);
+        OnCupChanged?.Invoke(cup);
     }
 
     private IEnumerator SnapIntoStack(AdditiveCard card, int slotIndex)
     {
         Vector2 target = stackOffsetPerCard * slotIndex;
-        while (Vector2.Distance(card.Rect.anchoredPosition, target) > 0.5f)
+        // card != null checked FIRST each iteration (short-circuits before touching
+        // card.Rect) since this coroutine runs on SodaBottle, not the card itself -
+        // destroying the card (e.g. ClearAndDestroy running mid-snap) doesn't stop
+        // it automatically, so it has to bail out on its own once the card is gone.
+        while (card != null && Vector2.Distance(card.Rect.anchoredPosition, target) > 0.5f)
         {
             card.Rect.anchoredPosition = Vector2.Lerp(card.Rect.anchoredPosition, target, Time.deltaTime * snapSpeed);
             yield return null;
         }
-        card.Rect.anchoredPosition = target;
+        if (card != null) card.Rect.anchoredPosition = target;
     }
 
     private void RestackAll()
