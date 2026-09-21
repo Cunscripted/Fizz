@@ -1,18 +1,21 @@
 using System.Collections;
 using UnityEngine;
+using UnityEngine.UI;
 using TMPro;
 
 /// <summary>
-/// A single floating score popup ("+10", "+2 Mult", "x1.5") that rises and fades
-/// out over a short duration, then destroys itself. Put this on a small UI prefab
-/// with a RectTransform, a TMP_Text (TextMeshProUGUI) component, and a CanvasGroup
-/// for the fade.
+/// A single floating popup ("+10", "+2 Mult", "x1.5", or an added/removed additive's
+/// icon + name) that rises and fades out over a short duration, then destroys itself.
+/// Put this on a small UI prefab with a RectTransform, a TMP_Text (TextMeshProUGUI),
+/// an optional Image for the icon variant, and a CanvasGroup for the fade.
 /// </summary>
 [RequireComponent(typeof(RectTransform))]
 public class FloatingScoreText : MonoBehaviour
 {
     public TMP_Text label;
     public CanvasGroup canvasGroup;
+    [Tooltip("Optional - shown only when Play() is given a non-null icon (e.g. an added/removed additive's sprite).")]
+    public Image iconImage;
 
     [Header("Motion")]
     public float riseDistance = 60f;
@@ -30,13 +33,18 @@ public class FloatingScoreText : MonoBehaviour
         if (canvasGroup == null) canvasGroup = GetComponent<CanvasGroup>();
     }
 
-    /// <summary>Call right after instantiating and positioning this popup.</summary>
-    public void Play(string text, Color color)
+    /// <summary>Call right after instantiating and positioning this popup. icon is optional - leave null for plain text popups.</summary>
+    public void Play(string text, Color color, Sprite icon = null)
     {
         if (label != null)
         {
             label.text = text;
             label.color = color;
+        }
+        if (iconImage != null)
+        {
+            iconImage.enabled = icon != null;
+            if (icon != null) iconImage.sprite = icon;
         }
         StartCoroutine(Animate());
     }

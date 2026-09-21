@@ -7,6 +7,9 @@ using UnityEngine;
 /// The 'efficiency' passed in (0 = used all attempts, 1 = succeeded on the
 /// first attempt) skews the odds toward rarer additives - this is the
 /// "doing it in fewer attempts increases pick rate of better additives" hook.
+/// skipStreak (see RoundManager.SkipStreak) adds an additional skew on top -
+/// the "skip offers to bank better odds on a future one" hook, shared with
+/// ModifierManager's syrup offers since they draw from the same streak.
 /// </summary>
 public class ShopManager : MonoBehaviour
 {
@@ -14,7 +17,7 @@ public class ShopManager : MonoBehaviour
     public List<AdditiveData> additivePool = new List<AdditiveData>();
     public int offerCount = 4;
 
-    [Header("Base weights (before efficiency skew)")]
+    [Header("Base weights (before efficiency/skip skew)")]
     public float commonWeight = 100f;
     public float uncommonWeight = 40f;
     public float rareWeight = 12f;
@@ -22,58 +25,27 @@ public class ShopManager : MonoBehaviour
 
     [Tooltip("How hard efficiency pulls odds toward rarer tiers. 0 = no effect.")]
     public float efficiencySkewStrength = 3f;
+    [Tooltip("How hard EACH consecutive shop/modifier skip (RoundManager.SkipStreak) pulls odds toward " +
+             "rarer tiers, on top of the efficiency skew above. 0 = no effect - skipping does nothing special.")]
+    public float skipSkewPerStack = 0.75f;
 
     public event Action<List<AdditiveData>> OnOffersReady;
 
-    public List<AdditiveData> GenerateOffers(float efficiency01)
+    public List<AdditiveData> GenerateOffers(float efficiency01, int skipStreak = 0)
     {
         efficiency01 = Mathf.Clamp01(efficiency01);
-        float skew = 1f + efficiency01 * efficiencySkewStrength;
+        float skew = 1f + efficiency01 * efficiencySkewStrength + Mathf.Max(0, skipStreak) * skipSkewPerStack;
 
-        var pool = new List<(AdditiveData data, float weight)>();
-        foreach (var a in additivePool)
+        var weights = new RarityWeightedPicker.Weights
         {
-            float w = BaseWeight(a.rarity);
-            if (a.rarity != Rarity.Common) w *= skew; // only rarer tiers benefit from the skew
-            pool.Add((a, w));
-        }
+            common = commonWeight,
+            uncommon = uncommonWeight,
+            rare = rareWeight,
+            legendary = legendaryWeight
+        };
 
-        var results = new List<AdditiveData>();
-        for (int i = 0; i < offerCount && pool.Count > 0; i++)
-        {
-            int pickedIndex = WeightedPickIndex(pool);
-            results.Add(pool[pickedIndex].data);
-            pool.RemoveAt(pickedIndex); // no duplicates within one offer
-        }
-
+        var results = RarityWeightedPicker.PickMany(additivePool, a => a.rarity, weights, skew, offerCount);
         OnOffersReady?.Invoke(results);
         return results;
-    }
-
-    private float BaseWeight(Rarity r)
-    {
-        switch (r)
-        {
-            case Rarity.Common: return commonWeight;
-            case Rarity.Uncommon: return uncommonWeight;
-            case Rarity.Rare: return rareWeight;
-            case Rarity.Legendary: return legendaryWeight;
-            default: return 1f;
-        }
-    }
-
-    private int WeightedPickIndex(List<(AdditiveData data, float weight)> pool)
-    {
-        float total = 0f;
-        foreach (var p in pool) total += p.weight;
-
-        float roll = UnityEngine.Random.value * total;
-        float cumulative = 0f;
-        for (int i = 0; i < pool.Count; i++)
-        {
-            cumulative += pool[i].weight;
-            if (roll <= cumulative) return i;
-        }
-        return pool.Count - 1;
     }
 }
