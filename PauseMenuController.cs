@@ -1,6 +1,5 @@
 using UnityEngine;
 using UnityEngine.Events;
-using UnityEngine.SceneManagement;
 using UnityEngine.UI;
 
 /// <summary>
@@ -20,6 +19,8 @@ public class PauseMenuController : MonoBehaviour
     public DeckStatsPanel deckStatsPanel;
 
     [Header("Main Menu")]
+    [Tooltip("Shared scene-loading utility - same one the main menu scene uses for Start Game.")]
+    public SceneNavigator sceneNavigator;
     [Tooltip("Scene to load when Main Menu is pressed. Leave blank if you'd rather handle " +
              "OnMainMenuRequested yourself (e.g. a non-scene-based main menu).")]
     public string mainMenuSceneName;
@@ -52,14 +53,15 @@ public class PauseMenuController : MonoBehaviour
 
     private void OpenDeckStats()
     {
-        if (deckStatsPanel != null) deckStatsPanel.Show();
+        // Toggle, not always-open - clicking again while it's already showing should close it.
+        deckStatsPanel?.Toggle();
     }
 
     private void GoToMainMenu()
     {
         if (freezeTimeScale) Time.timeScale = 1f; // don't leave the next scene permanently frozen
-        if (!string.IsNullOrEmpty(mainMenuSceneName))
-            SceneManager.LoadScene(mainMenuSceneName);
+        if (sceneNavigator != null && !string.IsNullOrEmpty(mainMenuSceneName))
+            sceneNavigator.LoadScene(mainMenuSceneName);
         OnMainMenuRequested?.Invoke();
     }
 }

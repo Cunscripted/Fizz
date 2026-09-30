@@ -1,6 +1,8 @@
 using System.Collections;
 using System.Collections.Generic;
+using TMPro;
 using UnityEngine;
+using UnityEngine.Events;
 
 /// <summary>
 /// Canvas UI version of the drop target. Attach to the SodaBottle's RectTransform.
@@ -23,16 +25,67 @@ public class SodaBottle : MonoBehaviour
     public float snapSpeed = 10f;
 
     [Header("Capacity")]
+    [Tooltip("Base capacity at the start of a run. AddCupCapacity syrups and AddCupCapacityPermanent additives " +
+             "raise it on top of this via AddCapacity() - read MaxAdditives for the real current limit.")]
     public int maxAdditives = 5;
 
-    public bool IsFull => _accepted.Count >= maxAdditives;
+    [Header("Capacity Text (optional)")]
+    [Tooltip("Shows how many additives are in the soda vs. how many it can hold, e.g. \"3/5\". Updated " +
+             "automatically whenever the cup or its capacity changes - no event wiring needed.")]
+    public TMP_Text capacityText;
+    [Tooltip("{0} = additives currently in the soda, {1} = maximum it can hold.")]
+    public string capacityTextFormat = "{0}/{1}";
+    public Color capacityTextColor = Color.white;
+    [Tooltip("Text color while the soda is full.")]
+    public Color capacityTextFullColor = new Color(1f, 0.45f, 0.35f);
+
+    /// <summary>Extra slots granted over the run by syrups/additives, on top of maxAdditives.</summary>
+    public int BonusCapacity { get; private set; }
+
+    /// <summary>The real current limit: base maxAdditives plus every permanent bonus earned this run.</summary>
+    public int MaxAdditives => Mathf.Max(0, maxAdditives + BonusCapacity);
+
+    /// <summary>How many additives are currently in the soda.</summary>
+    public int CurrentCount => _accepted.Count;
+
+    /// <summary>0-1 share of the soda's capacity currently used - what the liquid shader's fill level is driven by.</summary>
+    public float FillPercent => MaxAdditives > 0 ? Mathf.Clamp01((float)_accepted.Count / MaxAdditives) : 0f;
+
+    public bool IsFull => _accepted.Count >= MaxAdditives;
     public IReadOnlyList<AdditiveCard> AcceptedCards => _accepted;
     public bool Contains(AdditiveCard card) => _accepted.Contains(card);
     private readonly List<AdditiveCard> _accepted = new List<AdditiveCard>();
 
+    /// <summary>
+    /// Fires with the current cup contents any time an additive is added, removed,
+    /// or the bottle is cleared - lets anything (combo indicators, UI, etc.) react
+    /// to the cup live, not just SodaColorController.
+    /// </summary>
+    public UnityEvent<List<AdditiveInstance>> OnCupChanged;
+
+    /// <summary>Fires with (current count, max) whenever either changes - e.g. for a custom capacity display.</summary>
+    public UnityEvent<int, int> OnCapacityChanged;
+
     private void Awake()
     {
         if (dropZoneRect == null) dropZoneRect = GetComponent<RectTransform>();
+    }
+
+    private void Start()
+    {
+        NotifyCupChanged(); // so the capacity text and liquid fill show the right values from the first frame
+    }
+
+    /// <summary>
+    /// Permanently raises (or, with a negative amount, lowers) how many additives the soda can
+    /// hold for the rest of the run. Called by RoundManager for AddCupCapacity syrups and
+    /// AddCupCapacityPermanent additives.
+    /// </summary>
+    public void AddCapacity(int amount)
+    {
+        if (amount == 0) return;
+        BonusCapacity += amount;
+        NotifyCupChanged();
     }
 
     /// <summary>
@@ -46,7 +99,7 @@ public class SodaBottle : MonoBehaviour
 
     /// <summary>
     /// Called by AdditiveCard when it's released over this bottle.
-    /// Returns false (and accepts nothing) if the bottle is already at maxAdditives -
+    /// Returns false (and accepts nothing) if the bottle is already at MaxAdditives -
     /// the card should bounce back to the belt in that case.
     /// </summary>
     public bool AcceptAdditive(AdditiveCard card)
@@ -56,7 +109,7 @@ public class SodaBottle : MonoBehaviour
         _accepted.Add(card);
         if (stackAnchor != null) card.Rect.SetParent(stackAnchor, worldPositionStays: true);
         StartCoroutine(SnapIntoStack(card, _accepted.Count - 1));
-        colorController?.UpdateCup(GetCupInstances());
+        NotifyCupChanged();
         return true;
     }
 
@@ -72,7 +125,7 @@ public class SodaBottle : MonoBehaviour
         if (_accepted.Remove(card))
         {
             RestackAll();
-            colorController?.UpdateCup(GetCupInstances());
+            NotifyCupChanged();
         }
     }
 
@@ -97,18 +150,47 @@ public class SodaBottle : MonoBehaviour
         foreach (var c in _accepted)
             belt?.AddCard(c);
         _accepted.Clear();
-        colorController?.UpdateCup(GetCupInstances());
+        NotifyCupChanged();
+    }
+
+    /// <summary>Destroys every accepted card outright instead of returning it to the belt - used when the whole hand is being redrawn from scratch.</summary>
+    public void ClearAndDestroy()
+    {
+        foreach (var c in _accepted)
+            if (c != null) Destroy(c.gameObject);
+        _accepted.Clear();
+        NotifyCupChanged();
+    }
+
+    private void NotifyCupChanged()
+    {
+        var cup = GetCupInstances();
+        colorController?.UpdateCup(cup, MaxAdditives);
+        RefreshCapacityText();
+        OnCupChanged?.Invoke(cup);
+        OnCapacityChanged?.Invoke(_accepted.Count, MaxAdditives);
+    }
+
+    private void RefreshCapacityText()
+    {
+        if (capacityText == null) return;
+        capacityText.text = string.Format(capacityTextFormat, _accepted.Count, MaxAdditives);
+        capacityText.color = IsFull ? capacityTextFullColor : capacityTextColor;
     }
 
     private IEnumerator SnapIntoStack(AdditiveCard card, int slotIndex)
     {
         Vector2 target = stackOffsetPerCard * slotIndex;
-        while (Vector2.Distance(card.Rect.anchoredPosition, target) > 0.5f)
+        // card != null checked FIRST each iteration (short-circuits before touching
+        // card.Rect) since this coroutine runs on SodaBottle, not the card itself -
+        // destroying the card (e.g. ClearAndDestroy running mid-snap) doesn't stop
+        // it automatically, so it has to bail out on its own once the card is gone.
+        while (card != null && Vector2.Distance(card.Rect.anchoredPosition, target) > 0.5f)
         {
             card.Rect.anchoredPosition = Vector2.Lerp(card.Rect.anchoredPosition, target, Time.deltaTime * snapSpeed);
             yield return null;
         }
-        card.Rect.anchoredPosition = target;
+        if (card != null) card.Rect.anchoredPosition = target;
     }
 
     private void RestackAll()
