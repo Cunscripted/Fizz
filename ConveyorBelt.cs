@@ -6,7 +6,9 @@ using UnityEngine;
 /// flattened ellipse sized as a PERCENTAGE of this RectTransform's own size,
 /// rather than fixed world-space radii - so with a CanvasScaler set to "Scale
 /// With Screen Size", the belt automatically stays proportioned correctly as
-/// the window/camera resizes, instead of everything shifting around.
+/// the window/camera resizes, instead of everything shifting around. verticalOffset
+/// shifts that ellipse up/down within the belt's own bounds without moving the
+/// RectTransform itself.
 ///
 /// Cards live as children of this RectTransform while on the belt. Cards
 /// currently being dragged are skipped; cards added back (dropped somewhere
@@ -20,20 +22,15 @@ public class ConveyorBelt : MonoBehaviour
     [Range(0f, 1f)] public float radiusXPercent = 0.85f;
     [Range(0f, 1f)] public float radiusYPercent = 0.6f;
     public float rotationDegreesPerSecond = 8f;
+    [Tooltip("Shifts the belt's ellipse - and therefore every card's whole rotation path - up/down in " +
+             "anchored units, without moving this RectTransform (or its pivot/anchors) itself. Positive = up, " +
+             "negative = down. Useful for nudging the ring of cards off-center within the belt's own bounds " +
+             "(e.g. to clear a bottom UI element) instead of re-anchoring the whole belt.")]
+    public float verticalOffset = 0f;
 
     [Header("Motion")]
     [Tooltip("How fast non-dragged cards ease toward their belt slot. Higher = snappier.")]
     public float easeSpeed = 6f;
-
-    [Header("Draw Order")]
-    [Tooltip("Keeps this belt behind every other UI element sharing its parent (bottle, buttons, " +
-             "panels, etc.), while staying IN FRONT of backgroundVisual below if you've assigned one.")]
-    public bool alwaysRenderAtBack = true;
-    [Tooltip("Optional - a separate background/track image sibling (e.g. from ConveyorBeltShaderController) " +
-             "that should render even further back than the belt+cards themselves. If set, the belt is kept " +
-             "directly in front of it instead of unconditionally claiming the very first sibling slot, so the " +
-             "two don't fight over who's 'more behind'.")]
-    public RectTransform backgroundVisual;
 
     private RectTransform _rect;
     private readonly List<AdditiveCard> _cards = new List<AdditiveCard>();
@@ -56,38 +53,6 @@ public class ConveyorBelt : MonoBehaviour
                               $"({_rect.rect.width:0} x {_rect.rect.height:0}). Cards will all collapse to the " +
                               "same position since the ellipse radius is a percentage of this size - give this " +
                               "RectTransform an actual width/height.", this);
-        }
-
-        EnforceDrawOrder();
-    }
-
-    private void LateUpdate()
-    {
-        // Re-enforced every frame (cheap - just an index check/swap) rather than
-        // only once at Start, so the belt stays at the back even if something else
-        // dynamically adds or reorders siblings under the same parent later.
-        EnforceDrawOrder();
-    }
-
-    /// <summary>
-    /// Keeps the belt behind other UI without fighting a dedicated background sibling
-    /// for the very first slot - if backgroundVisual is assigned, the belt sits directly
-    /// in front of it (background stays furthest back); otherwise the belt just claims
-    /// the first slot itself.
-    /// </summary>
-    private void EnforceDrawOrder()
-    {
-        if (!alwaysRenderAtBack) return;
-
-        if (backgroundVisual != null && backgroundVisual.parent == _rect.parent)
-        {
-            int desiredIndex = backgroundVisual.GetSiblingIndex() + 1;
-            if (_rect.GetSiblingIndex() != desiredIndex)
-                _rect.SetSiblingIndex(desiredIndex);
-        }
-        else if (_rect.GetSiblingIndex() != 0)
-        {
-            _rect.SetAsFirstSibling();
         }
     }
 
@@ -139,7 +104,7 @@ public class ConveyorBelt : MonoBehaviour
         float angle = (_baseAngle + index * (360f / Mathf.Max(count, 1))) * Mathf.Deg2Rad;
         float radiusX = _rect.rect.width * 0.5f * radiusXPercent;
         float radiusY = _rect.rect.height * 0.5f * radiusYPercent;
-        return new Vector2(Mathf.Cos(angle) * radiusX, Mathf.Sin(angle) * radiusY);
+        return new Vector2(Mathf.Cos(angle) * radiusX, Mathf.Sin(angle) * radiusY + verticalOffset);
     }
 
     /// <summary>Call when a new card spawns at round start, or when a dropped card returns to the belt.</summary>
@@ -157,6 +122,14 @@ public class ConveyorBelt : MonoBehaviour
     public void RemoveCard(AdditiveCard card)
     {
         _cards.Remove(card);
+    }
+
+    /// <summary>Destroys every card currently on the belt and clears the internal list - used when redrawing a fresh hand.</summary>
+    public void ClearAllCards()
+    {
+        foreach (var c in _cards)
+            if (c != null) Destroy(c.gameObject);
+        _cards.Clear();
     }
 
     public IReadOnlyList<AdditiveCard> Cards => _cards;

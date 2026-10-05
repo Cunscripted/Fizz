@@ -13,7 +13,10 @@ public enum FlavorType
     Savory,
     Smooth,
     Fizzy,
-    Aftertaste
+    Aftertaste,
+    Salty,
+    Concentrates,
+    Waste
 }
 
 /// <summary>
@@ -39,6 +42,9 @@ public class FlavorPalette : ScriptableObject
         new FlavorColorEntry { flavor = FlavorType.Smooth,     color = new Color(0.88f, 0.9f, 0.95f) },
         new FlavorColorEntry { flavor = FlavorType.Fizzy,      color = new Color(0.55f, 0.95f, 1f) },
         new FlavorColorEntry { flavor = FlavorType.Aftertaste, color = new Color(0.4f, 0.12f, 0.5f) },
+        new FlavorColorEntry { flavor = FlavorType.Salty,        color = new Color(.5f, .5f, .5f)},
+        new FlavorColorEntry { flavor = FlavorType.Concentrates, color = new Color(0.95f, 0.6f, 0.05f) },
+        new FlavorColorEntry { flavor = FlavorType.Waste,        color = new Color (0.2f, 0.2f, 0.2f)}
     };
 
     private Dictionary<FlavorType, Color> _lookup;

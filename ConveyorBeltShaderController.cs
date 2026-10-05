@@ -14,6 +14,14 @@ using UnityEngine.UI;
 /// Works on either a world-space Renderer or a Canvas UI Graphic, same dual-path
 /// pattern as SodaColorController: Graphics get a cloned material instance at
 /// startup so this never edits the shared material asset.
+///
+/// Draw order: when alwaysRenderAtBack is on, this keeps whatever it's driving at the
+/// very back of its respective rendering layer - sortingOrder for the Renderer path
+/// (2D sprite-style sorting, forced to rendererBackSortingOrder so it sits below
+/// everything else in the same sortingLayer), or sibling index 0 for the Graphic
+/// (UI) path (ConveyorBelt itself doesn't manage draw order, so this is the only
+/// thing keeping the belt visual - and whatever's on top of it - behind the rest of
+/// the UI sharing its parent).
 /// </summary>
 public class ConveyorBeltShaderController : MonoBehaviour
 {
@@ -32,6 +40,15 @@ public class ConveyorBeltShaderController : MonoBehaviour
     public float direction = 0f;
     [Tooltip("Used directly when syncWithBelt is off.")]
     public float speed = 2f;
+
+    [Header("Draw Order")]
+    [Tooltip("Keeps whatever this is driving (Renderer or Graphic) at the very back of its own rendering " +
+             "layer. See the class comment above for exactly how the two paths behave.")]
+    public bool alwaysRenderAtBack = true;
+    [Tooltip("Renderer path only - sortingOrder forced onto this Renderer so it sits below everything else " +
+             "sharing its sortingLayer. Leave at the minimum unless something else needs to render even " +
+             "further back than this.")]
+    public int rendererBackSortingOrder = short.MinValue;
 
     private Renderer _renderer;
     private Graphic _graphic;
@@ -76,6 +93,14 @@ public class ConveyorBeltShaderController : MonoBehaviour
         Apply();
     }
 
+    private void LateUpdate()
+    {
+        // Re-enforced every frame (cheap - just a value/index check) rather than only
+        // once at Start, so this stays at the back even if something else dynamically
+        // reorders siblings or sortingOrder later.
+        if (alwaysRenderAtBack) EnforceDrawOrder();
+    }
+
     /// <summary>Call directly if you change the manual fields from code and want it to apply immediately.</summary>
     public void Apply()
     {
@@ -101,6 +126,22 @@ public class ConveyorBeltShaderController : MonoBehaviour
         {
             _instancedMaterial.SetFloat(DirectionID, effectiveDirection);
             _instancedMaterial.SetFloat(SpeedID, effectiveSpeed);
+        }
+    }
+
+    /// <summary>See the "Draw order" section of the class comment above for the full reasoning.</summary>
+    private void EnforceDrawOrder()
+    {
+        if (_renderer != null)
+        {
+            if (_renderer.sortingOrder != rendererBackSortingOrder)
+                _renderer.sortingOrder = rendererBackSortingOrder;
+        }
+        else if (_graphic != null)
+        {
+            var t = _graphic.transform;
+            if (t.GetSiblingIndex() != 0)
+                t.SetAsFirstSibling();
         }
     }
 }

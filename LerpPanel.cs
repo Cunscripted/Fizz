@@ -37,7 +37,21 @@ public class LerpPanel : MonoBehaviour
     public UnityEvent OnShown;
     public UnityEvent OnHidden;
 
+    /// <summary>
+    /// True from the moment Show() is called (not only once its animation finishes) until
+    /// Hide() is called. Callers use this right after Show() to check the panel opened - if
+    /// it only flipped at the END of the animation, those checks would wrongly see "closed"
+    /// for the whole fade-in (this is what broke DeckStatsPanel.ShowForDeletion).
+    /// </summary>
     public bool IsShown { get; private set; }
+
+    /// <summary>True while a show/hide animation is still playing.</summary>
+    public bool IsAnimating => _routine != null;
+
+    // Set once Show()/Hide() has been called, so Start() doesn't stomp on it - a panel that
+    // starts inactive gets Awake() the instant Show() activates it, but Start() only runs
+    // later that frame, and without this it would immediately snap the panel hidden again.
+    private bool _stateCommanded;
 
     private RectTransform _rect;
     private CanvasGroup _canvasGroup;
@@ -54,19 +68,46 @@ public class LerpPanel : MonoBehaviour
 
     private void Start()
     {
-        SetImmediate(!startHidden);
+        if (!_stateCommanded) SetImmediate(!startHidden);
     }
 
     public void Show()
     {
+        _stateCommanded = true;
+        IsShown = true;
         if (_routine != null) StopCoroutine(_routine);
         gameObject.SetActive(true);
+        if (!gameObject.activeInHierarchy)
+        {
+            // Can't animate (coroutines can't start on an inactive object) and nothing would
+            // be visible anyway - report it as NOT shown so callers checking IsShown right
+            // after Show() (e.g. DeckStatsPanel.ShowForDeletion) can react instead of waiting
+            // on a panel the player can never see.
+            Debug.LogWarning($"[LerpPanel] '{name}' Show() called but activeInHierarchy is still false after " +
+                              "SetActive(true) - a PARENT object is disabled, so this panel can't be shown. " +
+                              "Move it out from under that parent (or enable the parent first).", this);
+            IsShown = false;
+            _routine = null;
+            return;
+        }
         _routine = StartCoroutine(Animate(true));
     }
 
     public void Hide()
     {
+        _stateCommanded = true;
+        IsShown = false;
         if (_routine != null) StopCoroutine(_routine);
+        _routine = null;
+
+        if (!gameObject.activeInHierarchy)
+        {
+            // Already invisible (inactive itself or under an inactive parent) - coroutines can't
+            // start here, so just snap to the hidden state instead of throwing.
+            if (_canvasGroup != null) ApplyState(0f);
+            if (deactivateWhenHidden) gameObject.SetActive(false);
+            return;
+        }
         _routine = StartCoroutine(Animate(false));
     }
 
@@ -103,7 +144,6 @@ public class LerpPanel : MonoBehaviour
         }
 
         ApplyState(to);
-        IsShown = show;
         if (!show && deactivateWhenHidden) gameObject.SetActive(false);
 
         if (show) OnShown?.Invoke(); else OnHidden?.Invoke();
