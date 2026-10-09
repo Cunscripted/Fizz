@@ -21,7 +21,9 @@ public struct ScoreEvent
         RetriggerAll,      // RetriggerAllOtherAdditives - announces that every other cup additive is about to fire again (amount = times each)
         CupCapacityIncreased, // AddCupCapacityPermanent - permanently grew how many additives the soda bottle can hold
         ComboLevelUp,         // a FlavorComboRule reached a new level (amount = the new level)
-        HeatReduced           // flavor popularity heat was cut (amount = fraction removed, 1 = reset)
+        HeatReduced,          // flavor popularity heat was cut (amount = fraction removed, 1 = reset)
+        AttemptAdded,         // a combo permanently granted extra attempts per round (amount = how many)
+        Upgrade               // a combo granted a permanent syrup-style rule - the popup shows customLabel
     }
 
     public Kind kind;
@@ -68,4 +70,7 @@ public struct ScoreEvent
     /// so ScoreFXPlayer can show its icon on the popup, not just a generic "New Additive!" text.
     /// </summary>
     public AdditiveData addedAdditive;
+
+    /// <summary>Set only for Upgrade events - the short text to show, e.g. "Sour +5 Pts forever".</summary>
+    public string customLabel;
 }

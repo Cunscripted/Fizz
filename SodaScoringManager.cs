@@ -210,7 +210,15 @@ public class SodaScoringManager : MonoBehaviour
                 {
                     var effect = rule.effects[e];
                     if (effect == null) continue;
+                    if (effect.onlyOncePerRun && rule.HasEffectFiredOnce(e)) continue;
+                    if (effect.onlyOncePerRun) rule.MarkEffectFiredOnce(e);
                     float amount = rule.GetEffectAmount(e, level);
+
+                    void Upgrade(string label) => AddEvent(new ScoreEvent
+                    {
+                        kind = ScoreEvent.Kind.Upgrade, customLabel = label, anchor = context.fallbackAnchor,
+                        sourceLabel = rule.comboName, isCombo = true
+                    });
 
                     switch (effect.type)
                     {
@@ -250,8 +258,154 @@ public class SodaScoringManager : MonoBehaviour
                                 context.reduceHeat(fraction);
                                 AddEvent(new ScoreEvent { kind = ScoreEvent.Kind.HeatReduced, amount = fraction, anchor = context.fallbackAnchor, sourceLabel = rule.comboName, isCombo = true });
                             }
+                            if (fraction > 0f && effect.repeatEveryRound && PopularityManager.Instance != null)
+                                PopularityManager.Instance.AddRoundEndCoolingPercent(fraction);
                             break;
                         }
+
+                        // ---------- Syrup (ModifierData) abilities ----------
+
+                        case ComboBonusType.BoostComboRule:
+                        {
+                            var target = effect.targetComboRule != null ? effect.targetComboRule : rule;
+                            target.runtimeBonusAdd += amount;
+                            Upgrade($"{target.comboName} {ScoreFormat.Signed(amount)}");
+                            log.Add($"Combo '{rule.comboName}' boosted combo '{target.comboName}' by {amount}");
+                            break;
+                        }
+                        case ComboBonusType.RetriggerComboRule:
+                        {
+                            // Safe even when targeting itself: this pass's triggerCount was read before the loop,
+                            // so the extra triggers start from the NEXT soda.
+                            var target = effect.targetComboRule != null ? effect.targetComboRule : rule;
+                            int extra = FlavorComboRule.WholeCount(amount);
+                            target.runtimeExtraTriggers += extra;
+                            Upgrade($"{target.comboName} +{extra} trigger{(extra > 1 ? "s" : "")}");
+                            break;
+                        }
+                        case ComboBonusType.GlobalMult:
+                            // Granted before the global-mult step below, so it already counts for this soda.
+                            if (RequireModifierManager(rule, effect))
+                            {
+                                modifierManager.AddGlobalMult(amount);
+                                Upgrade($"{ScoreFormat.Signed(amount)} Mult forever");
+                            }
+                            break;
+
+                        case ComboBonusType.RetriggerForFlavor:
+                        {
+                            int times = FlavorComboRule.WholeCount(amount);
+                            if (effect.duration == ComboEffectDuration.RestOfRun)
+                            {
+                                if (RequireModifierManager(rule, effect))
+                                {
+                                    modifierManager.AddFlavorRetrigger(effect.targetFlavor, times);
+                                    Upgrade($"{effect.targetFlavor} retrigger +{times} forever");
+                                }
+                                break;
+                            }
+                            var flavorMatches = cup.Where(a => a != null && a.HasFlavor(effect.targetFlavor)).ToList();
+                            for (int r = 0; r < times; r++)
+                                foreach (var a in flavorMatches)
+                                    a.ApplyEffect(ref points, ref mult, context, ev =>
+                                    {
+                                        ev.isRetrigger = true;
+                                        AddEvent(ev);
+                                    });
+                            break;
+                        }
+
+                        case ComboBonusType.BoostFlavorPoints:
+                        case ComboBonusType.BoostFlavorMult:
+                        {
+                            bool isMult = effect.type == ComboBonusType.BoostFlavorMult;
+                            if (effect.duration == ComboEffectDuration.RestOfRun)
+                            {
+                                if (RequireModifierManager(rule, effect))
+                                {
+                                    if (isMult) modifierManager.AddFlavorMult(effect.targetFlavor, amount);
+                                    else modifierManager.AddFlavorPoints(effect.targetFlavor, amount);
+                                    Upgrade($"{effect.targetFlavor} {ScoreFormat.Signed(amount)} {(isMult ? "Mult" : "Pts")} forever");
+                                }
+                                break;
+                            }
+                            // This soda: every cup additive of the flavor pays out now, scaled by popularity
+                            // exactly like the syrup's per-additive bonus.
+                            foreach (var a in cup)
+                            {
+                                if (a == null || !a.HasFlavor(effect.targetFlavor)) continue;
+                                float bonus = amount * (context.getEffectiveness != null ? context.getEffectiveness(a) : 1f);
+                                if (isMult) mult += bonus; else points += bonus;
+                                Emit(isMult ? ScoreEvent.Kind.Mult : ScoreEvent.Kind.Points, bonus,
+                                     context.resolveCardRect?.Invoke(a) ?? context.fallbackAnchor, rule.comboName, isCombo: true);
+                            }
+                            break;
+                        }
+
+                        case ComboBonusType.ScalePerFlavorOnBelt:
+                        {
+                            if (effect.duration == ComboEffectDuration.RestOfRun)
+                            {
+                                if (RequireModifierManager(rule, effect))
+                                {
+                                    modifierManager.AddFlavorScaling(effect.scalingFlavors, effect.scaleIsMult, amount);
+                                    Upgrade($"{ScoreFormat.Signed(amount)} {(effect.scaleIsMult ? "Mult" : "Pts")} per belt match forever");
+                                }
+                                break;
+                            }
+                            int count = 0;
+                            if (effect.scalingFlavors != null && context.beltFlavorCounts != null)
+                                foreach (var flavor in effect.scalingFlavors)
+                                    if (context.beltFlavorCounts.TryGetValue(flavor, out int c)) count += c;
+                            if (count <= 0) break;
+                            float scaled = amount * count;
+                            if (effect.scaleIsMult) mult += scaled; else points += scaled;
+                            Emit(effect.scaleIsMult ? ScoreEvent.Kind.Mult : ScoreEvent.Kind.Points, scaled,
+                                 context.fallbackAnchor, rule.comboName, isCombo: true);
+                            break;
+                        }
+
+                        case ComboBonusType.RemoveAdditiveFromDeck:
+                        case ComboBonusType.RemoveRandomAdditiveFromDeck:
+                            RemoveComboAdditives(rule, effect, FlavorComboRule.WholeCount(amount), context, AddEvent, log);
+                            break;
+
+                        case ComboBonusType.AddAttempt:
+                        {
+                            int n = FlavorComboRule.WholeCount(amount);
+                            if (context.addAttempts == null)
+                            {
+                                Debug.LogWarning($"[SodaScoringManager] Combo '{rule.comboName}' AddAttempt fired, but context.addAttempts is unassigned - nothing granted.", this);
+                                break;
+                            }
+                            context.addAttempts(n);
+                            AddEvent(new ScoreEvent { kind = ScoreEvent.Kind.AttemptAdded, amount = n, anchor = context.fallbackAnchor, sourceLabel = rule.comboName, isCombo = true });
+                            break;
+                        }
+                        case ComboBonusType.AddBeltSize:
+                        {
+                            int n = FlavorComboRule.WholeCount(amount);
+                            context.addBeltSize?.Invoke(n);
+                            AddEvent(new ScoreEvent { kind = ScoreEvent.Kind.BeltSizeIncreased, amount = n, anchor = context.fallbackAnchor, sourceLabel = rule.comboName, isCombo = true });
+                            break;
+                        }
+                        case ComboBonusType.AddCupCapacity:
+                        {
+                            int n = FlavorComboRule.WholeCount(amount);
+                            context.addCupCapacity?.Invoke(n);
+                            AddEvent(new ScoreEvent { kind = ScoreEvent.Kind.CupCapacityIncreased, amount = n, anchor = context.fallbackAnchor, sourceLabel = rule.comboName, isCombo = true });
+                            break;
+                        }
+                        case ComboBonusType.BoostAmountGrowth:
+                            if (RequireModifierManager(rule, effect))
+                            {
+                                modifierManager.AddAmountGrowthRule(effect.filterByFlavor, effect.targetFlavor,
+                                                                    effect.amountGrowthMode, amount, effect.flipRate);
+                                Upgrade(effect.amountGrowthMode == AmountGrowthMode.FlipNegativeToPositive
+                                    ? "Shrinking cards now grow"
+                                    : $"Growth {ScoreFormat.Signed(amount)}");
+                            }
+                            break;
                     }
                 }
             }
@@ -390,6 +544,63 @@ public class SodaScoringManager : MonoBehaviour
         }
         log.Add($"Combo '{rule.comboName}' consumed {matching.Count} matched additive(s).");
         return true;
+    }
+
+    /// <summary>Permanent syrup-style combo rewards are stored on the ModifierManager - warns (instead of silently doing nothing) if none is assigned.</summary>
+    private bool RequireModifierManager(FlavorComboRule rule, ComboEffect effect)
+    {
+        if (modifierManager != null) return true;
+        Debug.LogWarning($"[SodaScoringManager] Combo '{rule.comboName}' {effect.type} fired, but this SodaScoringManager " +
+                         "has no Modifier Manager assigned - permanent combo rewards are stored there, so nothing was granted.", this);
+        return false;
+    }
+
+    /// <summary>
+    /// A combo's RemoveAdditiveFromDeck / RemoveRandomAdditiveFromDeck effect: removes up to `count` owned
+    /// additives (a specific template, or random - optionally of one flavor), same as the matching syrups.
+    /// </summary>
+    private void RemoveComboAdditives(FlavorComboRule rule, ComboEffect effect, int count, ScoringContext context,
+                                      System.Action<ScoreEvent> addEvent, List<string> log)
+    {
+        if (context.ownedAdditives == null || context.removeFromDeck == null)
+        {
+            Debug.LogWarning($"[SodaScoringManager] Combo '{rule.comboName}' {effect.type} fired, but the scoring context " +
+                             "has no owned additives / removeFromDeck - nothing was removed.", this);
+            return;
+        }
+
+        bool specific = effect.type == ComboBonusType.RemoveAdditiveFromDeck;
+        if (specific && effect.additiveToRemove == null)
+        {
+            Debug.LogWarning($"[SodaScoringManager] Combo '{rule.comboName}' RemoveAdditiveFromDeck fired, but Additive To Remove is unassigned.", this);
+            return;
+        }
+
+        // Snapshot first - removeFromDeck changes the owned list as we go.
+        var candidates = context.ownedAdditives
+            .Where(a => a != null && (specific
+                ? a.template == effect.additiveToRemove
+                : !effect.filterByFlavor || a.HasFlavor(effect.targetFlavor)))
+            .ToList();
+
+        int removed = 0;
+        for (int i = 0; i < count && candidates.Count > 0; i++)
+        {
+            int index = specific ? 0 : Random.Range(0, candidates.Count);
+            var victim = candidates[index];
+            candidates.RemoveAt(index);
+
+            context.removeFromDeck.Invoke(victim);
+            removed++;
+            addEvent(new ScoreEvent
+            {
+                kind = ScoreEvent.Kind.Deleted,
+                amount = 0f,
+                anchor = context.resolveCardRect?.Invoke(victim) ?? context.fallbackAnchor,
+                sourceLabel = victim.Name
+            });
+        }
+        if (removed > 0) log.Add($"Combo '{rule.comboName}' removed {removed} additive(s) from the deck.");
     }
 
     /// <summary>

@@ -69,6 +69,12 @@ public class ScoringContext
     public Action<int> addCupCapacity;
 
     /// <summary>
+    /// Invoked by a combo's AddAttempt effect to permanently grant extra attempts per round. Counts for the
+    /// round being played right now too, since attempts remaining is worked out after scoring.
+    /// </summary>
+    public Action<int> addAttempts;
+
+    /// <summary>
     /// Non-zero while a RetriggerAllOtherAdditives effect is in the middle of re-firing the
     /// rest of the cup. Any RetriggerAllOtherAdditives reached during that pass does nothing,
     /// so two of them in the same cup can never keep retriggering each other forever.

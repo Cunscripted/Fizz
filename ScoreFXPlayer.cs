@@ -12,6 +12,10 @@ using UnityEngine;
 /// regardless of which clip is chosen. Wire an instance of this into
 /// RoundManager.scoreFX; RoundManager waits for PlaySequence() to finish before
 /// resolving pass/fail, so the reveal always plays out before the round moves on.
+///
+/// After speedUpAfterEvents events in a mix, the delay between events and the
+/// score/points/mult bounce durations shrink exponentially toward minSpeedFactor
+/// of their normal values (approaching it, never reaching it).
 /// </summary>
 public class ScoreFXPlayer : MonoBehaviour
 {
@@ -33,7 +37,7 @@ public class ScoreFXPlayer : MonoBehaviour
     public Color heatReducedColor = new Color(0.55f, 0.8f, 1f); // icy blue - flavor heat cooled off
 
     [Header("Timing")]
-    [Tooltip("Delay between each scoring event's reveal.")]
+    [Tooltip("Delay between each scoring event's reveal (before any speed-up).")]
     public float delayBetweenEvents = 0.12f;
 
     [Header("Sound - one clip per category")]
@@ -65,6 +69,7 @@ public class ScoreFXPlayer : MonoBehaviour
     [Tooltip("How much pitch climbs per successive event, regardless of category.")]
     public float pitchStepPerEvent = 0.05f;
     public float maxPitch = 2.2f;
+    public float eventsThisMix = 0.0f;
 
     [Header("Score Display Sync (optional)")]
     [Tooltip("Counted up event by event during playback (via each ScoreEvent.runningTotal), " +
@@ -74,6 +79,7 @@ public class ScoreFXPlayer : MonoBehaviour
     public string scoreFormat = "N0";
     [Tooltip("How big the score text's punch-scale bounce is (1 = no bounce).")]
     public float scoreBouncePunchScale = 1.25f;
+    [Tooltip("Score bounce length (before any speed-up).")]
     public float scoreBounceDuration = 0.2f;
 
     [Header("Points / Mult Display (optional)")]
@@ -90,6 +96,7 @@ public class ScoreFXPlayer : MonoBehaviour
     public bool showEffectiveMult = true;
     [Tooltip("How big the points/mult bounce is (1 = no bounce).")]
     public float statBouncePunchScale = 1.3f;
+    [Tooltip("Points/mult bounce length (before any speed-up).")]
     public float statBounceDuration = 0.18f;
     [Tooltip("Optional - briefly tints the text this color at the peak of its bounce, then fades back to its normal color. " +
              "Leave alpha at 0 to turn the flash off.")]
@@ -101,6 +108,25 @@ public class ScoreFXPlayer : MonoBehaviour
     [Tooltip("How long to wait after the last event before resetting, if Reset Stats After Sequence is on.")]
     public float resetStatsDelay = 0.6f;
 
+    [Header("Speed Up")]
+    [Tooltip("How many events in a mix play at normal speed before the speed-up kicks in.")]
+    public int speedUpAfterEvents = 13;
+    [Tooltip("How quickly timing shrinks once the speed-up starts. Higher = faster ramp (0.1 - 0.3 is a good range).")]
+    public float speedUpRate = 0.15f;
+    [Tooltip("Fastest timing allowed, as a fraction of normal (0.25 = 4x speed). Timing approaches this but never reaches it.")]
+    [Range(0.01f, 1f)]
+    public float minSpeedFactor = 0.25f;
+    [Tooltip("Also play sounds faster as the sequence speeds up. In Unity, faster playback also raises pitch.")]
+    public bool speedUpSounds = true;
+    [Tooltip("How closely sound speed follows the visual speed-up. 1 = matches it exactly, 0.5 = halfway, 0 = no change.")]
+    [Range(0f, 1f)]
+    public float soundSpeedUpAmount = 0.5f;
+    [Tooltip("Highest final pitch a sound can play at, after the per-event climb and the speed-up are combined.")]
+    public float maxSoundPitch = 3f;
+
+    // Current multiplier applied to delay and bounce durations (1 = normal speed).
+    private float _speedFactor = 1f;
+
     private Coroutine _scoreBounceRoutine;
     private readonly Dictionary<TMP_Text, Coroutine> _statBounces = new Dictionary<TMP_Text, Coroutine>();
     private readonly Dictionary<TMP_Text, Vector3> _baseScales = new Dictionary<TMP_Text, Vector3>();
@@ -109,6 +135,17 @@ public class ScoreFXPlayer : MonoBehaviour
     private void Start()
     {
         SetStats(0f, 0f); // show "0 x 1" (or your formats' equivalent) from the start rather than placeholder text
+    }
+
+    /// <summary>
+    /// 1 for the first speedUpAfterEvents events, then decays exponentially toward
+    /// minSpeedFactor without ever reaching it.
+    /// </summary>
+    private float SpeedFactorFor(float eventCount)
+    {
+        float n = Mathf.Max(0f, eventCount - speedUpAfterEvents);
+        float factor = minSpeedFactor + (1f - minSpeedFactor) * Mathf.Exp(-speedUpRate * n);
+        return Mathf.Max(factor, minSpeedFactor); // guards against float precision issues
     }
 
     /// <summary>Directly sets the points/mult texts without bouncing, e.g. to clear them between rounds.</summary>
@@ -149,22 +186,31 @@ public class ScoreFXPlayer : MonoBehaviour
         if (runningScoreText != null) runningScoreText.text = ScoreFormat.Big(baselineScore, scoreFormat);
         SetStats(0f, 0f); // every soda starts from 0 points / 0 mult
 
+        // Each mix starts back at normal speed. Remove these two lines if you want
+        // the speed-up to carry over from one sequence to the next.
+        eventsThisMix = 0;
+        _speedFactor = 1f;
+
         float pitch = basePitch;
         foreach (var ev in events)
         {
+            eventsThisMix++;
+            _speedFactor = SpeedFactorFor(eventsThisMix);
+
             SpawnFloatingText(ev);
             PlaySound(ev, pitch);
             TriggerCardJump(ev);
             UpdateRunningScore(baselineScore + ev.runningTotal);
             UpdateStats(ev);
             pitch = Mathf.Min(pitch + pitchStepPerEvent, maxPitch);
-            yield return new WaitForSeconds(delayBetweenEvents);
+            yield return new WaitForSeconds(delayBetweenEvents * _speedFactor);
         }
 
         if (resetStatsAfterSequence)
         {
             yield return new WaitForSeconds(resetStatsDelay);
             SetStats(0f, 0f);
+            eventsThisMix = 0;
         }
     }
 
@@ -194,10 +240,10 @@ public class ScoreFXPlayer : MonoBehaviour
         if (!_baseColors.ContainsKey(text)) _baseColors[text] = text.color;
 
         if (_statBounces.TryGetValue(text, out var running) && running != null) StopCoroutine(running);
-        _statBounces[text] = StartCoroutine(BounceStatRoutine(text, flashColor));
+        _statBounces[text] = StartCoroutine(BounceStatRoutine(text, flashColor, statBounceDuration * _speedFactor));
     }
 
-    private IEnumerator BounceStatRoutine(TMP_Text text, Color flashColor)
+    private IEnumerator BounceStatRoutine(TMP_Text text, Color flashColor, float duration)
     {
         var rect = text.rectTransform;
         Vector3 baseScale = _baseScales[text];
@@ -205,10 +251,10 @@ public class ScoreFXPlayer : MonoBehaviour
         bool flash = flashColor.a > 0f;
 
         float t = 0f;
-        while (t < statBounceDuration)
+        while (t < duration)
         {
             t += Time.deltaTime;
-            float p = Mathf.Clamp01(t / statBounceDuration);
+            float p = Mathf.Clamp01(t / duration);
             float arc = Mathf.Sin(p * Mathf.PI); // 0 -> 1 -> 0
             rect.localScale = baseScale * (1f + arc * (statBouncePunchScale - 1f));
             if (flash) text.color = Color.Lerp(baseColor, new Color(flashColor.r, flashColor.g, flashColor.b, baseColor.a), arc);
@@ -228,17 +274,17 @@ public class ScoreFXPlayer : MonoBehaviour
         runningScoreText.text = ScoreFormat.Big(total, scoreFormat);
 
         if (_scoreBounceRoutine != null) StopCoroutine(_scoreBounceRoutine);
-        _scoreBounceRoutine = StartCoroutine(BounceScoreText());
+        _scoreBounceRoutine = StartCoroutine(BounceScoreText(scoreBounceDuration * _speedFactor));
     }
 
-    private IEnumerator BounceScoreText()
+    private IEnumerator BounceScoreText(float duration)
     {
         var rect = runningScoreText.rectTransform;
         float t = 0f;
-        while (t < scoreBounceDuration)
+        while (t < duration)
         {
             t += Time.deltaTime;
-            float p = Mathf.Clamp01(t / scoreBounceDuration);
+            float p = Mathf.Clamp01(t / duration);
             // Same sine-arc shape as AdditiveCard's jump, but on scale instead of
             // position - punches up then eases back to normal size.
             float scale = 1f + Mathf.Sin(p * Mathf.PI) * (scoreBouncePunchScale - 1f);
@@ -289,6 +335,8 @@ public class ScoreFXPlayer : MonoBehaviour
             case ScoreEvent.Kind.CupCapacityIncreased: return $"Cup +{ev.amount:0}!";
             case ScoreEvent.Kind.ComboLevelUp: return $"{ev.sourceLabel} Lv {ev.amount:0}!";
             case ScoreEvent.Kind.HeatReduced: return ev.amount >= 0.999f ? "Heat Reset!" : $"Heat -{ev.amount * 100f:0}%!";
+            case ScoreEvent.Kind.AttemptAdded: return $"{prefix}Attempts +{ev.amount:0}!";
+            case ScoreEvent.Kind.Upgrade: return $"{prefix}{ev.customLabel}!";
             default: return $"{prefix}{ev.amount:0.#}";
         }
     }
@@ -306,6 +354,8 @@ public class ScoreFXPlayer : MonoBehaviour
             case ScoreEvent.Kind.RetriggerAll: return retriggerAllColor;
             case ScoreEvent.Kind.CupCapacityIncreased: return cupCapacityColor;
             case ScoreEvent.Kind.HeatReduced: return heatReducedColor;
+            case ScoreEvent.Kind.AttemptAdded: return cupCapacityColor;
+            case ScoreEvent.Kind.Upgrade: return buffColor;
             default: return multColor; // Mult or XMult
         }
     }
@@ -323,6 +373,8 @@ public class ScoreFXPlayer : MonoBehaviour
             ScoreEvent.Kind.BeltSizeIncreased => beltSizeClip,
             ScoreEvent.Kind.RetriggerAll => retriggerAllClip != null ? retriggerAllClip : retriggerClip,
             ScoreEvent.Kind.CupCapacityIncreased => cupCapacityClip != null ? cupCapacityClip : beltSizeClip,
+            ScoreEvent.Kind.AttemptAdded => cupCapacityClip != null ? cupCapacityClip : beltSizeClip,
+            ScoreEvent.Kind.Upgrade => buffClip,
             ScoreEvent.Kind.Points => ev.isRetrigger ? retriggerClip : pointsClip,
             _ => ev.isRetrigger ? retriggerClip : multClip, // Mult or XMult
         };
@@ -335,7 +387,15 @@ public class ScoreFXPlayer : MonoBehaviour
         if (audioSource == null || clip == null) return;
         // PlayOneShot bakes in the source's pitch AT CALL TIME, so rapid successive
         // calls with different pitches layer correctly even if they overlap.
-        audioSource.pitch = pitch;
+        float finalPitch = pitch;
+        if (speedUpSounds)
+        {
+            // _speedFactor shrinks toward minSpeedFactor, so 1/_speedFactor is how many
+            // times faster things are running (e.g. 0.25 -> 4x). Blend toward that.
+            float soundSpeed = Mathf.Lerp(1f, 1f / _speedFactor, soundSpeedUpAmount);
+            finalPitch = Mathf.Min(pitch * soundSpeed, maxSoundPitch);
+        }
+        audioSource.pitch = finalPitch;
         audioSource.PlayOneShot(clip);
     }
 }

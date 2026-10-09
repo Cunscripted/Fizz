@@ -10,6 +10,30 @@ public enum ComboBonusType
     RetriggerMatchingAdditives, // re-runs the effect of every matching additive instance
     AddAdditiveToDeck,          // adds an additive to the owned collection - specific (additiveToAdd) or random (see RandomAdditivePicker fields below)
     ReduceHeatPercent,          // cuts every flavor's popularity heat by `amount` as a fraction (0.25 = 25%, 1 = reset)
+
+    // --- Everything a syrup (ModifierData) can do, as a combo reward ---
+    // NOTE: new entries MUST go at the END - Unity serializes enums as integers, so inserting one
+    // in the middle would silently change the effect type of every existing combo asset.
+    BoostComboRule,             // permanently raises a combo's first effect by `amount` (targetComboRule, or this combo if empty)
+    RetriggerComboRule,         // permanently makes a combo (targetComboRule, or this one) fire `amount` more times per soda
+    GlobalMult,                 // permanently adds `amount` mult to every soda for the rest of the run
+    RetriggerForFlavor,         // cup additives of targetFlavor fire `amount` more times (this soda, or every soda - see duration)
+    BoostFlavorPoints,          // cup additives of targetFlavor give `amount` bonus points (this soda, or every soda)
+    BoostFlavorMult,            // cup additives of targetFlavor give `amount` bonus mult (this soda, or every soda)
+    ScalePerFlavorOnBelt,       // `amount` points/mult per belt additive matching scalingFlavors (this soda, or every soda)
+    RemoveAdditiveFromDeck,     // removes `amount` owned additive(s) matching additiveToRemove
+    RemoveRandomAdditiveFromDeck, // removes `amount` random owned additive(s), optionally of targetFlavor only
+    AddAttempt,                 // permanently grants `amount` extra attempts per round (applies to the current round too)
+    AddBeltSize,                // permanently draws `amount` more additives onto the belt each round
+    AddCupCapacity,             // permanently lets the bottle hold `amount` more additives
+    BoostAmountGrowth,          // permanently changes every additive's per-use amount change (like the syrup)
+}
+
+/// <summary>How long a combo's flavor/belt bonus lasts once it fires.</summary>
+public enum ComboEffectDuration
+{
+    ThisSoda,  // applied immediately to the soda being scored, then gone
+    RestOfRun  // becomes a permanent rule for every soda after this one, exactly like the matching syrup
 }
 
 /// <summary>
@@ -19,6 +43,8 @@ public enum ComboBonusType
 ///   RetriggerMatchingAdditives : amount = how many times the matching additives fire again (min 1)
 ///   AddAdditiveToDeck       : uses the rule's Add Additive fields; amount above 1 adds extra copies
 ///   ReduceHeatPercent       : amount = fraction of every flavor's popularity heat removed (0.25 = 25%, 1 = reset)
+///   The syrup-style effects (BoostComboRule onward) use the same meaning of amount as the matching
+///   ModifierEffectType, plus the target fields below that apply to their type.
 /// amountPerLevel is added to amount for every level above 1 (see FlavorComboRule leveling).
 /// </summary>
 [System.Serializable]
@@ -28,6 +54,57 @@ public class ComboEffect
     public float amount = 2f;
     [Tooltip("Added to Amount for every level this combo has above level 1. E.g. amount 2, +1 per level = 2, 3, 4...")]
     public float amountPerLevel = 0f;
+
+    [Tooltip("If on, this effect only does anything the FIRST time the combo fires each run. Recommended for " +
+             "permanent effects (attempts, belt size, cup capacity, global mult...) on an easy-to-trigger combo, " +
+             "since otherwise they stack every single brew.")]
+    public bool onlyOncePerRun = false;
+
+    [Tooltip("Retrigger For Flavor / Boost Flavor Points / Boost Flavor Mult / Scale Per Flavor On Belt: " +
+             "This Soda = applies right now to the soda being scored. Rest Of Run = becomes a permanent rule " +
+             "for every LATER soda, exactly like the syrup version.")]
+    public ComboEffectDuration duration = ComboEffectDuration.ThisSoda;
+
+    [Tooltip("Boost Combo Rule / Retrigger Combo Rule: which combo to upgrade. Leave empty to upgrade THIS combo.")]
+    public FlavorComboRule targetComboRule;
+
+    [Tooltip("Retrigger For Flavor / Boost Flavor Points / Boost Flavor Mult: the flavor affected. " +
+             "Remove Random Additive / Boost Amount Growth: the flavor filter (when Filter By Flavor is on).")]
+    public FlavorType targetFlavor;
+
+    [Tooltip("Remove Random Additive From Deck / Boost Amount Growth: only affect additives with Target Flavor.")]
+    public bool filterByFlavor = false;
+
+    [Tooltip("Scale Per Flavor On Belt: belt additives matching ANY of these are counted (a card with two listed " +
+             "flavors counts twice, same as the syrup).")]
+    public List<FlavorType> scalingFlavors = new List<FlavorType>();
+    [Tooltip("Scale Per Flavor On Belt: give mult instead of points.")]
+    public bool scaleIsMult = false;
+
+    [Tooltip("Remove Additive From Deck: removes owned additive(s) made from this template.")]
+    public AdditiveData additiveToRemove;
+
+    [Tooltip("Boost Amount Growth: Flat Addition adds Amount to every non-zero per-use change. Flip Negative To " +
+             "Positive makes shrinking cards grow instead, at Flip Rate.")]
+    public AmountGrowthMode amountGrowthMode = AmountGrowthMode.FlatAddition;
+    [Tooltip("Boost Amount Growth (Flip Negative To Positive only): how much of a negative change comes back as growth. 0.5 = half.")]
+    [Min(0f)] public float flipRate = 0.5f;
+
+    [Tooltip("Reduce Heat Percent: also cut heat by the same fraction at the end of EVERY round for the rest of the run.")]
+    public bool repeatEveryRound = false;
+
+    /// <summary>True for effects whose Duration setting matters.</summary>
+    public static bool HasDuration(ComboBonusType t) =>
+        t == ComboBonusType.RetriggerForFlavor || t == ComboBonusType.BoostFlavorPoints ||
+        t == ComboBonusType.BoostFlavorMult || t == ComboBonusType.ScalePerFlavorOnBelt;
+
+    /// <summary>True for effects that permanently change the run when they fire (worth flagging "Only Once Per Run").</summary>
+    public bool IsPermanent =>
+        type == ComboBonusType.BoostComboRule || type == ComboBonusType.RetriggerComboRule ||
+        type == ComboBonusType.GlobalMult || type == ComboBonusType.AddAttempt ||
+        type == ComboBonusType.AddBeltSize || type == ComboBonusType.AddCupCapacity ||
+        type == ComboBonusType.BoostAmountGrowth ||
+        (HasDuration(type) && duration == ComboEffectDuration.RestOfRun);
 }
 
 /// <summary>
@@ -138,12 +215,25 @@ public class FlavorComboRule : ScriptableObject
 
     public int EffectiveTriggerCount => 1 + runtimeExtraTriggers;
 
+    /// <summary>Indices of effects with onlyOncePerRun that have already fired this run. Not serialized.</summary>
+    [System.NonSerialized] private HashSet<int> _effectsFiredOnce;
+
+    /// <summary>For onlyOncePerRun effects: true if this effect index has already fired this run.</summary>
+    public bool HasEffectFiredOnce(int effectIndex) => _effectsFiredOnce != null && _effectsFiredOnce.Contains(effectIndex);
+
+    public void MarkEffectFiredOnce(int effectIndex)
+    {
+        if (_effectsFiredOnce == null) _effectsFiredOnce = new HashSet<int>();
+        _effectsFiredOnce.Add(effectIndex);
+    }
+
     /// <summary>Clears everything modifiers/scoring changed at runtime. SodaScoringManager calls this when the gameplay scene loads, so a retry starts clean.</summary>
     public void ResetRuntimeState()
     {
         hasAddedToDeck = false;
         runtimeBonusAdd = 0f;
         runtimeExtraTriggers = 0;
+        _effectsFiredOnce?.Clear();
     }
 
     private void OnEnable()
@@ -210,24 +300,68 @@ public class FlavorComboRule : ScriptableObject
         var bonuses = new List<string>();
         for (int i = 0; i < (effects?.Count ?? 0); i++)
         {
-            float amount = GetEffectAmount(i, level);
-            string text = effects[i].type switch
-            {
-                ComboBonusType.BonusPoints => $"{ScoreFormat.Signed(amount)} Points",
-                ComboBonusType.BonusMult => $"{ScoreFormat.Signed(amount)} Mult",
-                ComboBonusType.BonusXMult => $"x{amount:0.##} Mult",
-                ComboBonusType.RetriggerMatchingAdditives => RetriggerCount(amount) > 1
-                    ? $"Retriggers matching additives x{RetriggerCount(amount)}"
-                    : "Retriggers matching additives",
-                ComboBonusType.AddAdditiveToDeck => DescribeAddToDeck(AddCount(amount)),
-                ComboBonusType.ReduceHeatPercent => amount >= 0.999f ? "Resets all flavor heat" : $"Cools all flavors by {Mathf.Clamp01(amount) * 100f:0}%",
-                _ => ""
-            };
+            if (effects[i] == null) continue;
+            string text = DescribeEffect(effects[i], GetEffectAmount(i, level));
+            if (!string.IsNullOrEmpty(text) && effects[i].onlyOncePerRun) text += " (once per run)";
             if (!string.IsNullOrEmpty(text)) bonuses.Add(text);
         }
 
         return $"{requirement}: {(bonuses.Count > 0 ? string.Join(", ", bonuses) : "(no rewards set)")}";
     }
+
+    /// <summary>One effect's UI text at a given amount, e.g. "+3 Mult" or "Sour additives +5 Points for the rest of the run".</summary>
+    private string DescribeEffect(ComboEffect e, float amount)
+    {
+        int whole = WholeCount(amount);
+        string forever = e.duration == ComboEffectDuration.RestOfRun ? " for the rest of the run" : "";
+        string comboName = e.targetComboRule != null && e.targetComboRule != this ? $"'{e.targetComboRule.comboName}'" : "this combo";
+        switch (e.type)
+        {
+            case ComboBonusType.BonusPoints: return $"{ScoreFormat.Signed(amount)} Points";
+            case ComboBonusType.BonusMult: return $"{ScoreFormat.Signed(amount)} Mult";
+            case ComboBonusType.BonusXMult: return $"x{amount:0.##} Mult";
+            case ComboBonusType.RetriggerMatchingAdditives:
+                return RetriggerCount(amount) > 1 ? $"Retriggers matching additives x{RetriggerCount(amount)}" : "Retriggers matching additives";
+            case ComboBonusType.AddAdditiveToDeck: return DescribeAddToDeck(AddCount(amount));
+            case ComboBonusType.ReduceHeatPercent:
+            {
+                string heat = amount >= 0.999f ? "Resets all flavor heat" : $"Cools all flavors by {Mathf.Clamp01(amount) * 100f:0}%";
+                return e.repeatEveryRound ? heat + " (and every round after)" : heat;
+            }
+            case ComboBonusType.BoostComboRule: return $"Permanently boosts {comboName} by {ScoreFormat.Signed(amount)}";
+            case ComboBonusType.RetriggerComboRule: return $"{comboName} permanently fires {whole} more time{(whole > 1 ? "s" : "")}";
+            case ComboBonusType.GlobalMult: return $"{ScoreFormat.Signed(amount)} Mult on every soda for the rest of the run";
+            case ComboBonusType.RetriggerForFlavor:
+                return $"Retriggers {e.targetFlavor} additives{(whole > 1 ? $" x{whole}" : "")}{forever}";
+            case ComboBonusType.BoostFlavorPoints: return $"{e.targetFlavor} additives {ScoreFormat.Signed(amount)} Points{forever}";
+            case ComboBonusType.BoostFlavorMult: return $"{e.targetFlavor} additives {ScoreFormat.Signed(amount)} Mult{forever}";
+            case ComboBonusType.ScalePerFlavorOnBelt:
+            {
+                string flavors = e.scalingFlavors != null && e.scalingFlavors.Count > 0 ? string.Join("/", e.scalingFlavors) : "(no flavor)";
+                return $"{ScoreFormat.Signed(amount)} {(e.scaleIsMult ? "Mult" : "Points")} per {flavors} additive on the belt{forever}";
+            }
+            case ComboBonusType.RemoveAdditiveFromDeck:
+                return e.additiveToRemove != null
+                    ? $"Removes '{e.additiveToRemove.additiveName}'{(whole > 1 ? $" x{whole}" : "")} from your deck"
+                    : "Removes an additive from your deck";
+            case ComboBonusType.RemoveRandomAdditiveFromDeck:
+                return $"Removes {(whole > 1 ? $"{whole} random" : "a random")}{(e.filterByFlavor ? $" {e.targetFlavor}" : "")} additive{(whole > 1 ? "s" : "")} from your deck";
+            case ComboBonusType.AddAttempt: return $"+{whole} attempt{(whole > 1 ? "s" : "")} per round";
+            case ComboBonusType.AddBeltSize: return $"Belt +{whole}";
+            case ComboBonusType.AddCupCapacity: return $"Cup +{whole}";
+            case ComboBonusType.BoostAmountGrowth:
+            {
+                string who = e.filterByFlavor ? $"{e.targetFlavor} additives" : "additives";
+                return e.amountGrowthMode == AmountGrowthMode.FlipNegativeToPositive
+                    ? $"Shrinking {who} grow instead (x{e.flipRate:0.##})"
+                    : $"Growing/shrinking {who} change {ScoreFormat.Signed(amount)} more per use";
+            }
+            default: return "";
+        }
+    }
+
+    /// <summary>Whole-number amount for count-style effects (attempts, belt, cup, removals, retriggers). Min 1.</summary>
+    public static int WholeCount(float amount) => Mathf.Max(1, Mathf.RoundToInt(amount));
 
     /// <summary>For RetriggerMatchingAdditives: amount = how many times the matching additives fire again (min 1).</summary>
     public static int RetriggerCount(float amount) => Mathf.Max(1, Mathf.RoundToInt(amount));

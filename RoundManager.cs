@@ -382,6 +382,7 @@ public class RoundManager : MonoBehaviour
             },
             addBeltSize = amount => _bonusBeltSize += amount,
             addCupCapacity = amount => bottle.AddCapacity(amount),
+            addAttempts = amount => _bonusAttempts += amount,
             getEffectiveness = popularity != null ? popularity.GetEffectiveness : (System.Func<AdditiveInstance, float>)null,
             reduceHeat = popularity != null ? popularity.ReduceAllHeat : (System.Action<float>)null,
             modifyAmountChange = modifierManager != null ? modifierManager.ModifyAmountChange : (System.Func<AdditiveInstance, float, float>)null,

@@ -631,7 +631,11 @@ public static class SodaEditorFields
                                 "  Retrigger Matching Additives: Amount = how many times they fire again.\n" +
                                 "  Reduce Heat Percent: Amount = share of every flavor's heat removed (0.25 = 25%, 1 = reset).\n" +
                                 "  Add Additive To Deck: uses the settings below; Amount above 1 adds extra copies.\n" +
-                                "Amount Per Level is added for every level above 1.", MessageType.None);
+                                "Every syrup ability is available too (Boost/Retrigger Combo Rule, Global Mult, flavor " +
+                                "boosts, belt scaling, removing additives, attempts, belt/cup size, amount growth). " +
+                                "Flavor boosts and belt scaling can last This Soda or the Rest Of Run.\n" +
+                                "Amount Per Level is added for every level above 1. Turn on Only Once Per Run for " +
+                                "permanent effects you don't want stacking every brew.", MessageType.None);
 
         bool anyAddToDeck = false;
         for (int i = 0; i < effectsProp.arraySize; i++)
@@ -783,6 +787,39 @@ public static class SodaEditorFields
                 problems.Add("Add Additive To Deck: Create Randomly is on but the pool is empty and Filter By Flavor is off - nothing to pick from.");
             if (rule.addOnlyOnce)
                 notes.Add("Add Only Once is on - it creates (and consumes) only the first time it fires each run.");
+        }
+
+        // 6. Syrup-style rewards
+        if (rule.effects != null)
+        {
+            bool needsModifierManager = false;
+            for (int i = 0; i < rule.effects.Count; i++)
+            {
+                var e = rule.effects[i];
+                if (e == null) continue;
+                string which = $"Effect {i + 1} ({ObjectNames.NicifyVariableName(e.type.ToString())})";
+
+                if (e.type == ComboBonusType.RemoveAdditiveFromDeck && e.additiveToRemove == null)
+                    problems.Add($"{which}: Additive To Remove is empty, so nothing is removed.");
+                if (e.type == ComboBonusType.ScalePerFlavorOnBelt && (e.scalingFlavors == null || e.scalingFlavors.Count == 0))
+                    problems.Add($"{which}: no Belt Flavors Counted, so it never gives anything.");
+                if (e.IsPermanent && !e.onlyOncePerRun)
+                    notes.Add($"{which} is permanent and stacks EVERY time this combo fires. Turn on Only Once Per Run if that's not intended.");
+                if (e.type == ComboBonusType.ReduceHeatPercent && e.repeatEveryRound && !e.onlyOncePerRun)
+                    notes.Add($"{which}: Also Every Round After stacks another per-round cooling each time the combo fires - consider Only Once Per Run.");
+
+                if (e.type == ComboBonusType.GlobalMult || e.type == ComboBonusType.BoostAmountGrowth ||
+                    (ComboEffect.HasDuration(e.type) && e.duration == ComboEffectDuration.RestOfRun))
+                    needsModifierManager = true;
+            }
+
+            if (needsModifierManager)
+            {
+                foreach (var sm in FindInOpenScenes<SodaScoringManager>())
+                    if (new SerializedObject(sm).FindProperty("modifierManager")?.objectReferenceValue == null)
+                        problems.Add("This combo has a Rest Of Run / Global Mult / Amount Growth effect, but SodaScoringManager's " +
+                                     "Modifier Manager slot is empty - those rewards are stored there, so they'd do nothing.");
+            }
         }
 
         if (problems.Count > 0)

@@ -161,6 +161,40 @@ public class ModifierManager : MonoBehaviour
         return RarityWeightedPicker.PickMany(modifierPool, m => m.rarity, weights, skew, offerCount);
     }
 
+    // ---------- Permanent rules, shared by syrups (ApplyModifier) and combo rewards (SodaScoringManager) ----------
+    // Each of these is exactly what the matching syrup effect does, minus adding a syrup to ActiveModifiers -
+    // so a combo can grant "a syrup's ability" without the player appearing to own another syrup.
+
+    public void AddGlobalMult(float amount) => GlobalMultBonus += amount;
+
+    public void AddFlavorRetrigger(FlavorType flavor, int count) =>
+        _flavorRules.Add(new FlavorRule { flavor = flavor, retriggerBonus = Mathf.Max(1, count) });
+
+    public void AddFlavorPoints(FlavorType flavor, float amount) =>
+        _flavorRules.Add(new FlavorRule { flavor = flavor, pointsBonus = amount });
+
+    public void AddFlavorMult(FlavorType flavor, float amount) =>
+        _flavorRules.Add(new FlavorRule { flavor = flavor, multBonus = amount });
+
+    public void AddFlavorScaling(List<FlavorType> flavors, bool isMult, float amountPerCount) =>
+        _flavorScaling.Add(new FlavorScalingBonus
+        {
+            // Copied so a later edit to the source list (a syrup/combo asset) can't change an already-granted rule.
+            flavors = flavors != null ? new List<FlavorType>(flavors) : new List<FlavorType>(),
+            isMult = isMult,
+            amountPerCount = amountPerCount
+        });
+
+    public void AddAmountGrowthRule(bool filterByFlavor, FlavorType flavor, AmountGrowthMode mode, float bonus, float flipRate) =>
+        _amountGrowthRules.Add(new AmountGrowthRule
+        {
+            anyFlavor = !filterByFlavor,
+            flavor = flavor,
+            mode = mode,
+            bonus = bonus,
+            flipRate = Mathf.Max(0f, flipRate)
+        });
+
     public ModifierApplyResult ApplyModifier(ModifierData modifier, List<AdditiveInstance> ownedAdditives, List<AdditiveData> allAdditivesPool = null)
     {
         var result = new ModifierApplyResult();
@@ -179,32 +213,23 @@ public class ModifierManager : MonoBehaviour
                 break;
 
             case ModifierEffectType.GlobalMult:
-                GlobalMultBonus += modifier.amount;
+                AddGlobalMult(modifier.amount);
                 break;
 
             case ModifierEffectType.RetriggerForFlavor:
-                _flavorRules.Add(new FlavorRule
-                {
-                    flavor = modifier.targetFlavor,
-                    retriggerBonus = Mathf.Max(1, Mathf.RoundToInt(modifier.amount))
-                });
+                AddFlavorRetrigger(modifier.targetFlavor, Mathf.RoundToInt(modifier.amount));
                 break;
 
             case ModifierEffectType.BoostFlavorPoints:
-                _flavorRules.Add(new FlavorRule { flavor = modifier.targetFlavor, pointsBonus = modifier.amount });
+                AddFlavorPoints(modifier.targetFlavor, modifier.amount);
                 break;
 
             case ModifierEffectType.BoostFlavorMult:
-                _flavorRules.Add(new FlavorRule { flavor = modifier.targetFlavor, multBonus = modifier.amount });
+                AddFlavorMult(modifier.targetFlavor, modifier.amount);
                 break;
 
             case ModifierEffectType.ScalePerFlavorOnBelt:
-                _flavorScaling.Add(new FlavorScalingBonus
-                {
-                    flavors = modifier.scalingFlavors,
-                    isMult = modifier.scaleIsMult,
-                    amountPerCount = modifier.amount
-                });
+                AddFlavorScaling(modifier.scalingFlavors, modifier.scaleIsMult, modifier.amount);
                 break;
 
             case ModifierEffectType.AddAdditiveToDeck:
@@ -262,14 +287,8 @@ public class ModifierManager : MonoBehaviour
                 break;
 
             case ModifierEffectType.BoostAmountGrowth:
-                _amountGrowthRules.Add(new AmountGrowthRule
-                {
-                    anyFlavor = !modifier.filterByFlavor,
-                    flavor = modifier.targetFlavor,
-                    mode = modifier.amountGrowthMode,
-                    bonus = modifier.amount,
-                    flipRate = Mathf.Max(0f, modifier.flipRate)
-                });
+                AddAmountGrowthRule(modifier.filterByFlavor, modifier.targetFlavor, modifier.amountGrowthMode,
+                                    modifier.amount, modifier.flipRate);
                 break;
 
             case ModifierEffectType.ReduceHeatPercent:
