@@ -1,0 +1,2 @@
+# OK So Fair Warning
+I really suck at writing comments in my code so the comments are all Claude code generated. Outside of that, the only AI in this game is the stuff in the Editor Folder (mainly just to make my task less tedious by not having to create a billion scriptable objects by just menuing through it all.)
