@@ -7,7 +7,8 @@ using UnityEngine.UI;
 /// <summary>
 /// Drives the full round loop:
 ///   Spawn 10 additives on the belt -> player builds a soda in the bottle ->
-///   Brew (score) -> up to 3 attempts to meet the round's score requirement ->
+///   Brew (score) -> up to 3 attempts, each attempt's total ADDING to a cumulative
+///   round score, until that cumulative total meets the round's requirement ->
 ///   on success, offer 4 additives from the shop (odds skewed by how efficiently
 ///   the round was won) -> every 5th round, offer a permanent modifier first ->
 ///   next round.
@@ -27,6 +28,13 @@ public class RoundManager : MonoBehaviour
     public ShopManager shopManager;
     public ModifierManager modifierManager;
     public AdditiveCard cardPrefab;
+    [Tooltip("Used by DeletePlayerChosenThenSelf additives to let the player pick which owned additive gets " +
+             "deleted, via DeckStatsPanel's special deletion mode (ShowForDeletion). Optional, but any such " +
+             "additive's player-choice request is silently skipped (logged as a warning) without it.")]
+    public DeckStatsPanel deckStatsPanel;
+    [Tooltip("Optional - flavor popularity. Overused flavors pay out less, neglected ones pay out more. Falls back " +
+             "to PopularityManager.Instance if left empty; with neither, every additive always pays out 1x.")]
+    public PopularityManager popularity;
 
     [Header("Brew Button")]
     [Tooltip("Drag your 'Brew'/'Score' Button here - it's wired to OnBrewPressed() automatically at " +
@@ -37,11 +45,56 @@ public class RoundManager : MonoBehaviour
     [Tooltip("Optional - plays floating +N/xN text and escalating-pitch audio for each scoring step. " +
              "If unset, scoring resolves instantly with no reveal animation.")]
     public ScoreFXPlayer scoreFX;
+    [Tooltip("Optional - shows a popup when a syrup is applied (and its added/removed additive, if any). " +
+             "Syrup selection has no other visual feedback otherwise.")]
+    public SyrupApplyPopup syrupFX;
+
+    [Header("First-Time Intro")]
+    [Tooltip("Optional. If assigned and this is the player's first-ever load of the gameplay scene, " +
+             "BeginRound() is held off here in Start() - GameplayIntroController plays its video first " +
+             "and calls BeginRound() itself once that finishes (or is skipped). On every later load, " +
+             "or if left unassigned, the round begins immediately as before.")]
+    public GameplayIntroController introController;
 
     [Header("Starting Collection")]
-    [Tooltip("Templates the player starts the run owning. Grows via shop picks.")]
+    [Tooltip("Templates the player starts the run owning, used when no Starting Deck Set is active (see below). " +
+             "Grows via shop picks.")]
     public List<AdditiveData> startingAdditives = new List<AdditiveData>();
     public int cardsPerRound = 10;
+
+    /// <summary>A named set of additives the player can start a run with.</summary>
+    [System.Serializable]
+    public class StartingDeckSet
+    {
+        public string setName = "New Deck";
+        [TextArea] public string description;
+        [Tooltip("Additives the run starts with. List one more than once to start with several copies.")]
+        public List<AdditiveData> additives = new List<AdditiveData>();
+    }
+
+    public enum StartingDeckChoice
+    {
+        UseStartingAdditivesList, // the plain Starting Additives list above
+        UseActiveSet,             // the set picked in Active Set Index
+        RandomSet                 // a random set from Starting Deck Sets every run
+    }
+
+    [Header("Starting Deck Sets")]
+    [Tooltip("Named starting decks. Add as many as you like, then choose which one a run uses below.")]
+    public List<StartingDeckSet> startingDeckSets = new List<StartingDeckSet>();
+    [Tooltip("Which starting deck a run uses.")]
+    public StartingDeckChoice startingDeckChoice = StartingDeckChoice.UseStartingAdditivesList;
+    [Tooltip("Index into Starting Deck Sets, used when Starting Deck Choice is Use Active Set.")]
+    public int activeSetIndex = 0;
+
+    /// <summary>
+    /// Set this (e.g. from a main-menu deck picker, before loading the gameplay scene) to override the
+    /// Inspector choice for the NEXT run only: the set's name, matched case-insensitively. Cleared once used.
+    /// </summary>
+    public static string NextRunDeckName;
+
+    /// <summary>The set the current run started with (null if it used the plain Starting Additives list).</summary>
+    public StartingDeckSet CurrentStartingSet { get; private set; }
 
     [Header("Round Difficulty")]
     public int baseScoreRequirement = 100;
@@ -50,41 +103,208 @@ public class RoundManager : MonoBehaviour
     public int maxAttempts = 3;
     public int modifierEveryNRounds = 5;
 
+    public enum ScoreScalingMode
+    {
+        Off,               // requirements follow the normal round curve only
+        GradualIncrease,   // beating a round by a wide margin permanently raises future requirements a little
+        PercentOfLastScore // next round needs a share of the score you just got; if that's below normal, a share of normal is added on top
+    }
+
+    [Header("Round Difficulty - Scale With Score")]
+    [Tooltip("Off = normal round curve only.\n" +
+             "Gradual Increase = beating a round by a wide margin permanently raises every future round's requirement a little.\n" +
+             "Percent Of Last Score = the next round needs Percent Of Last Score of what you just scored. If that's below the " +
+             "normal requirement, Added Percent Of Normal of the normal requirement is added on top (never ending up below normal).")]
+    public ScoreScalingMode scoreScaling = ScoreScalingMode.GradualIncrease;
+
+    [Header("Gradual Increase mode")]
+    [Tooltip("How much future requirements rise each time you DOUBLE a round's requirement. 0.1 = +10% per doubling: " +
+             "scoring 2x the target adds 10%, 4x adds 20%, 8x adds 30% (it grows slowly, so huge overshoots don't explode).")]
+    [Range(0f, 1f)] public float scoreScalingPerDoubling = 0.1f;
+    [Tooltip("The most a single round can raise future requirements by, e.g. 1.5 = at most +50% from one round.")]
+    [Min(1f)] public float maxScoreScalingPerRound = 1.5f;
+    [Tooltip("Overshoot below this ratio is ignored, e.g. 1.5 = only rounds where you scored more than 1.5x the target count.")]
+    [Min(1f)] public float scoreScalingStartsAt = 1.5f;
+
+    [Header("Percent Of Last Score mode")]
+    [Tooltip("Next round's requirement = this share of the score from the round you just won (0.75 = 75%).")]
+    [Range(0f, 2f)] public float percentOfLastScore = 0.75f;
+    [Tooltip("If the share above comes out LOWER than the normal requirement (round curve + rerolls), this share of the " +
+             "normal requirement is ADDED to it (0.5 = +50% of normal). The result is still never below the normal requirement.")]
+    [Range(0f, 2f)] public float addedPercentOfNormal = 0.5f;
+
     /// <summary>Base maxAttempts plus any permanent bonus granted by AddAttempt syrups.</summary>
     public int EffectiveMaxAttempts => maxAttempts + _bonusAttempts;
     private int _bonusAttempts = 0;
 
+    /// <summary>Base cardsPerRound plus any permanent bonus granted by AddBeltSize syrups.</summary>
+    public int EffectiveCardsPerRound => cardsPerRound + _bonusBeltSize;
+    private int _bonusBeltSize = 0;
+
     [Header("Events (wire to UI)")]
     public UnityEvent<int> OnRoundStarted;                 // round number
     public UnityEvent<int> OnScoreRequirementSet;           // required score
-    public UnityEvent<float, int> OnAttemptScored;          // total score, attempts remaining
+    public UnityEvent<float, int> OnAttemptScored;          // cumulative round score so far, attempts remaining
     public UnityEvent OnRoundSucceeded;
     public UnityEvent OnGameOver;
     public UnityEvent<List<AdditiveData>> OnShopOffersReady;
     public UnityEvent<List<ModifierData>> OnModifierOffersReady;
 
+    public MusicManager musicManager;
+
     public State CurrentState { get; private set; }
     public int RoundNumber { get; private set; } = 1;
     public int AttemptsUsed { get; private set; } = 0;
-    public int CurrentRequirement { get; private set; }
+    /// <summary>The round's score requirement as a double (can go far past 2.1 billion).</summary>
+    public double CurrentRequirementValue { get; private set; }
+
+    /// <summary>Old int version, kept for anything that still reads it - capped at int.MaxValue instead of wrapping negative.</summary>
+    public int CurrentRequirement => ScoreFormat.ClampToInt(CurrentRequirementValue);
+
+    /// <summary>Sum of every attempt's total so far this round - what's actually checked against CurrentRequirement.</summary>
+    public double CumulativeScore { get; private set; }
 
     /// <summary>Everything the player currently owns, for a deck-stats/collection view.</summary>
     public IReadOnlyList<AdditiveInstance> OwnedAdditives => _ownedAdditives;
 
+    /// <summary>
+    /// How many shop/modifier offers in a row the player has skipped WITHOUT picking
+    /// anything, shared across both menus - fed into ShopManager/ModifierManager's
+    /// weighted-by-rarity offer generation to skew subsequent offers toward rarer
+    /// tiers the longer this streak runs. Resets to 0 the moment a pick is actually
+    /// made in either menu (see OnShopPickChosen/OnModifierChosen) - the payoff for
+    /// banking skips.
+    /// </summary>
+    public int SkipStreak => _skipStreak;
+    private int _skipStreak = 0;
+
+    [Header("Shop Skip / Reroll")]
+    [Tooltip("Each reroll permanently multiplies every FUTURE round's score requirement by this - a smaller bump " +
+             "than a whole round (Difficulty Growth). E.g. 1.08 = +8% per reroll.")]
+    public float rerollRequirementGrowth = 1.08f;
+    [Tooltip("Max rerolls per shop visit. 0 = unlimited.")]
+    public int maxRerollsPerShop = 0;
+
+    /// <summary>
+    /// Total shops skipped this run - never resets. Permanently raises shop rarity odds, and every
+    /// ShopManager.skipsPerExtraOffer skips adds another offer slot.
+    /// </summary>
+    public int ShopSkips { get; private set; }
+
+    /// <summary>
+    /// Player-chosen card deletions skipped this run (the Skip button on DeckStatsPanel's deletion
+    /// screen) - never resets. Each one permanently raises shop rarity odds slightly
+    /// (ShopManager.deletionSkipSkewPerStack).
+    /// </summary>
+    public int DeletionSkips { get; private set; }
+
+    /// <summary>Total rerolls this run.</summary>
+    public int ShopRerolls { get; private set; }
+
+    /// <summary>Rerolls used in the current shop visit.</summary>
+    public int RerollsThisShop { get; private set; }
+
+    /// <summary>Permanent multiplier on score requirements from rerolls (1 = none yet).</summary>
+    public float RerollRequirementMultiplier { get; private set; } = 1f;
+
+    /// <summary>Permanent multiplier on score requirements from beating rounds by a wide margin (1 = none yet). Gradual Increase mode only.</summary>
+    public double ScoreRequirementMultiplier { get; private set; } = 1.0;
+
+    // Percent Of Last Score mode: the round that was just won, and what was scored in it.
+    private int _lastWonRound = -1;
+    private double _lastWonScore;
+
+    /// <summary>What the NEXT round will require, with rerolls so far included.</summary>
+    public double NextRoundRequirement => RequirementForRound(RoundNumber + 1);
+
+    public bool CanReroll => CurrentState == State.Shopping && (maxRerollsPerShop <= 0 || RerollsThisShop < maxRerollsPerShop);
+
+    /// <summary>Fires with the new offers when the shop is rerolled (ShopMenuController swaps its cards).</summary>
+    public event System.Action<List<AdditiveData>> ShopRerolled;
+
+    /// <summary>The normal requirement for a round: base * growth curve * rerolls. No score scaling of either kind.</summary>
+    private double NormalRequirementForRound(int round) =>
+        baseScoreRequirement * System.Math.Pow(difficultyGrowth, round - 1) * RerollRequirementMultiplier;
+
+    private double RequirementForRound(int round)
+    {
+        double normal = NormalRequirementForRound(round);
+        switch (scoreScaling)
+        {
+            case ScoreScalingMode.GradualIncrease:
+                return System.Math.Round(normal * ScoreRequirementMultiplier);
+
+            case ScoreScalingMode.PercentOfLastScore:
+                // Only the round right after a win is based on that win's score; round 1 (nothing won yet) is normal.
+                if (_lastWonRound >= 0 && round == _lastWonRound + 1)
+                {
+                    double fromScore = _lastWonScore * percentOfLastScore;
+                    if (fromScore >= normal) return System.Math.Round(fromScore);
+                    // Below normal: add a share of normal on top, and still never end up under normal.
+                    return System.Math.Round(System.Math.Max(fromScore + normal * addedPercentOfNormal, normal));
+                }
+                return System.Math.Round(normal);
+
+            default:
+                return System.Math.Round(normal);
+        }
+    }
+
+    /// <summary>
+    /// After a won round: if the player scored well past the requirement, permanently raise future requirements
+    /// by scoreScalingPerDoubling for every doubling of the target they reached (log2, so it stays gentle),
+    /// capped per round by maxScoreScalingPerRound.
+    /// </summary>
+    private void ApplyScoreScaling()
+    {
+        if (scoreScaling != ScoreScalingMode.GradualIncrease || scoreScalingPerDoubling <= 0f || CurrentRequirementValue <= 0.0) return;
+
+        double ratio = CumulativeScore / CurrentRequirementValue;
+        if (double.IsNaN(ratio) || ratio < scoreScalingStartsAt) return;
+
+        double doublings = System.Math.Log(System.Math.Min(ratio, 1e12), 2.0);
+        double growth = System.Math.Min(1.0 + doublings * scoreScalingPerDoubling, maxScoreScalingPerRound);
+        if (growth <= 1.0) return;
+
+        ScoreRequirementMultiplier *= growth;
+        Debug.Log($"[RoundManager] Scored {ratio:0.##}x the requirement - future requirements x{growth:0.###} " +
+                  $"(total from score scaling x{ScoreRequirementMultiplier:0.###}). Next round needs {NextRoundRequirement}.");
+    }
+
     private readonly List<AdditiveInstance> _ownedAdditives = new List<AdditiveInstance>();
+
+    /// <summary>
+    /// DeletePlayerChosenThenSelf additives queue themselves up here (via
+    /// ScoringContext.requestPlayerDeletion) during a scoring pass; ResolvePlayerDeletions()
+    /// works through them one at a time right after that attempt's score is booked.
+    /// </summary>
+    private readonly List<AdditiveInstance> _pendingPlayerDeletions = new List<AdditiveInstance>();
 
     private void Start()
     {
-        foreach (var template in startingAdditives)
-            _ownedAdditives.Add(new AdditiveInstance(template));
+        if (popularity == null) popularity = PopularityManager.Instance;
+
+        foreach (var template in GetStartingAdditives())
+            if (template != null) _ownedAdditives.Add(new AdditiveInstance(template));
 
         if (modifierManager != null)
+        {
             modifierManager.OnAttemptBonusGranted += amount => _bonusAttempts += amount;
+            modifierManager.OnBeltSizeBonusGranted += amount => _bonusBeltSize += amount;
+            modifierManager.OnCupCapacityBonusGranted += amount => bottle?.AddCapacity(amount);
+        }
 
         if (brewButton != null)
             brewButton.onClick.AddListener(OnBrewPressed);
 
-        BeginRound();
+        // If a first-time intro video is about to play, hold off - GameplayIntroController
+        // calls BeginRound() itself once the video ends or gets skipped. WillPlayIntro is
+        // decided in its Awake(), which always runs before this Start(), so this is safe to
+        // read regardless of script execution order between the two components.
+        if (introController == null || !introController.WillPlayIntro)
+            BeginRound();
+
+        musicManager = FindObjectOfType<MusicManager>();
     }
 
     private void OnDestroy()
@@ -93,24 +313,98 @@ public class RoundManager : MonoBehaviour
             brewButton.onClick.RemoveListener(OnBrewPressed);
     }
 
+    // ---------- Starting deck ----------
+
+    /// <summary>
+    /// Works out which additives this run starts with: a set requested via NextRunDeckName wins,
+    /// otherwise Starting Deck Choice decides. Falls back to the plain Starting Additives list if the
+    /// chosen set doesn't exist or is empty.
+    /// </summary>
+    public List<AdditiveData> GetStartingAdditives()
+    {
+        CurrentStartingSet = PickStartingSet();
+        if (CurrentStartingSet != null)
+        {
+            Debug.Log($"[RoundManager] Starting deck: '{CurrentStartingSet.setName}' ({CurrentStartingSet.additives.Count} additives).", this);
+            return CurrentStartingSet.additives;
+        }
+        return startingAdditives;
+    }
+
+    private StartingDeckSet PickStartingSet()
+    {
+        var usable = startingDeckSets.FindAll(s => s != null && s.additives != null && s.additives.Exists(a => a != null));
+
+        if (!string.IsNullOrEmpty(NextRunDeckName))
+        {
+            string wanted = NextRunDeckName;
+            NextRunDeckName = null; // one run only
+            var named = usable.Find(s => string.Equals(s.setName, wanted, System.StringComparison.OrdinalIgnoreCase));
+            if (named != null) return named;
+            Debug.LogWarning($"[RoundManager] No starting deck set named '{wanted}' (or it's empty) - using the Inspector choice instead.", this);
+        }
+
+        switch (startingDeckChoice)
+        {
+            case StartingDeckChoice.UseActiveSet:
+                if (activeSetIndex >= 0 && activeSetIndex < startingDeckSets.Count && usable.Contains(startingDeckSets[activeSetIndex]))
+                    return startingDeckSets[activeSetIndex];
+                Debug.LogWarning($"[RoundManager] Active Set Index {activeSetIndex} isn't a valid, non-empty set - using Starting Additives instead.", this);
+                return null;
+            case StartingDeckChoice.RandomSet:
+                if (usable.Count > 0) return usable[Random.Range(0, usable.Count)];
+                Debug.LogWarning("[RoundManager] Random Set chosen but no non-empty Starting Deck Sets exist - using Starting Additives instead.", this);
+                return null;
+            default:
+                return null;
+        }
+    }
+
+    /// <summary>Every additive in any starting source (plain list + all sets) - for editor tools.</summary>
+    public IEnumerable<AdditiveData> AllStartingAdditives()
+    {
+        foreach (var a in startingAdditives) yield return a;
+        foreach (var set in startingDeckSets)
+            if (set?.additives != null)
+                foreach (var a in set.additives) yield return a;
+    }
+
     // ---------- Round start ----------
 
     public void BeginRound()
     {
+        Debug.Log($"[RoundManager] BeginRound() - round {RoundNumber}.");
+
         CurrentState = State.Spawning;
         AttemptsUsed = 0;
-        CurrentRequirement = Mathf.RoundToInt(baseScoreRequirement * Mathf.Pow(difficultyGrowth, RoundNumber - 1));
+        CumulativeScore = 0.0;
+        CurrentRequirementValue = RequirementForRound(RoundNumber);
 
-        var hand = DrawHand(cardsPerRound);
+        SpawnHand();
+
+        OnRoundStarted?.Invoke(RoundNumber);
+        OnScoreRequirementSet?.Invoke(CurrentRequirement); // int event: capped, never negative
+        scoringManager.SetRequiredScoreDisplay(CurrentRequirementValue);
+        scoringManager.SetCurrentScoreDisplay(0.0);
+        CurrentState = State.Playing;
+    }
+
+    /// <summary>
+    /// Destroys whatever's currently on the belt and draws a brand new random hand
+    /// from the owned collection. Called at the start of every round, AND after
+    /// every brew attempt (success or failed-with-attempts-remaining) - so the
+    /// belt is never the same 10 cards twice in a row.
+    /// </summary>
+    private void SpawnHand()
+    {
+        belt.ClearAllCards();
+
+        var hand = DrawHand(EffectiveCardsPerRound);
         foreach (var instance in hand)
         {
             var card = Instantiate(cardPrefab, belt.transform);
             card.instance = instance;
         }
-
-        OnRoundStarted?.Invoke(RoundNumber);
-        OnScoreRequirementSet?.Invoke(CurrentRequirement);
-        CurrentState = State.Playing;
     }
 
     private List<AdditiveInstance> DrawHand(int count)
@@ -137,40 +431,97 @@ public class RoundManager : MonoBehaviour
     {
         CurrentState = State.Scoring;
 
-        // Snapshot the cup's card views so score events can be anchored to the
-        // specific card that produced them (for the floating text spawn point).
+        // Snapshot the cup's AND belt's card views so score events can be anchored to the
+        // specific card that produced them (for the floating text spawn point / jump).
         var cupCards = bottle.AcceptedCards;
+        var beltCards = belt.Cards;
         RectTransform ResolveCardRect(AdditiveInstance inst)
         {
             foreach (var c in cupCards)
                 if (c.instance == inst) return c.Rect;
+            foreach (var c in beltCards)
+                if (c.instance == inst) return c.Rect;
             return null;
         }
+
+        var beltInstances = new List<AdditiveInstance>();
+        foreach (var c in beltCards)
+            if (c.instance != null) beltInstances.Add(c.instance);
 
         var context = new ScoringContext
         {
             cup = bottle.GetCupInstances(),
+            cupCapacity = bottle.MaxAdditives,
             ownedAdditives = _ownedAdditives,
             beltFlavorCounts = belt.GetFlavorCounts(),
+            beltInstances = beltInstances,
+            allAdditivesPool = shopManager != null ? shopManager.additivePool : null,
             addToDeck = template =>
             {
                 if (template != null) _ownedAdditives.Add(new AdditiveInstance(template));
             },
+            removeFromDeck = inst =>
+            {
+                if (inst != null) _ownedAdditives.Remove(inst);
+            },
+            requestPlayerDeletion = inst =>
+            {
+                if (inst != null) _pendingPlayerDeletions.Add(inst);
+            },
+            addBeltSize = amount => _bonusBeltSize += amount,
+            addCupCapacity = amount => bottle.AddCapacity(amount),
+            addAttempts = amount => _bonusAttempts += amount,
+            getEffectiveness = popularity != null ? popularity.GetEffectiveness : (System.Func<AdditiveInstance, float>)null,
+            reduceHeat = popularity != null ? popularity.ReduceAllHeat : (System.Action<float>)null,
+            reduceFlavorHeat = popularity != null ? popularity.ReduceFlavorHeat : (System.Action<FlavorType, float>)null,
+            modifyAmountChange = modifierManager != null ? modifierManager.ModifyAmountChange : (System.Func<AdditiveInstance, float, float>)null,
             resolveCardRect = ResolveCardRect,
             fallbackAnchor = bottle.dropZoneRect
         };
 
+        // Capacity gained while scoring counts right away, but the bottle's capacity text holds at the
+        // old value and ticks up one slot per "Cup +1!" popup during the reveal below.
+        bottle.BeginCapacityReveal();
         var result = scoringManager.ScoreSoda(context);
 
         if (scoreFX != null)
-            yield return StartCoroutine(scoreFX.PlaySequence(result.events));
+        {
+            System.Action<ScoreEvent> onEvent = ev =>
+            {
+                if (ev.kind == ScoreEvent.Kind.CupCapacityIncreased)
+                    bottle.RevealCapacityStep(Mathf.RoundToInt(ev.amount));
+            };
+            scoreFX.EventPlayed += onEvent;
+            try
+            {
+                yield return StartCoroutine(scoreFX.PlaySequence(result.events, CumulativeScore));
+            }
+            finally
+            {
+                scoreFX.EventPlayed -= onEvent;
+            }
+        }
+        bottle.EndCapacityReveal();
+
+        // Update flavor popularity AFTER the reveal, so this soda was scored with the
+        // popularity it was built under and card cues change once the popups are done.
+        popularity?.RecordBrew(context.cup);
+
+        CumulativeScore += result.total;
+        scoringManager.SetCurrentScoreDisplay(CumulativeScore);
 
         AttemptsUsed++;
 
         int attemptsRemaining = EffectiveMaxAttempts - AttemptsUsed;
-        OnAttemptScored?.Invoke(result.total, attemptsRemaining);
+        OnAttemptScored?.Invoke((float)CumulativeScore, attemptsRemaining); // float event kept for existing listeners
 
-        if (result.total >= CurrentRequirement)
+        // Resolve any DeletePlayerChosenThenSelf requests queued up during this attempt's
+        // scoring pass - opens deckStatsPanel in its deletion mode and waits for the
+        // player to actually click a card before continuing, one request at a time.
+        if (_pendingPlayerDeletions.Count > 0)
+            yield return StartCoroutine(ResolvePlayerDeletions());
+
+        if (CumulativeScore >= CurrentRequirementValue)
         {
             HandleRoundSuccess(attemptsRemaining);
         }
@@ -181,25 +532,90 @@ public class RoundManager : MonoBehaviour
         }
         else
         {
-            // Failed but attempts remain: reset the cup for another try with the same hand.
-            bottle.ClearToBelt(belt);
+            // Failed but attempts remain: throw out this hand entirely and draw a
+            // brand new random one, rather than reusing the same 10 additives.
+            bottle.ClearAndDestroy();
+            SpawnHand();
             CurrentState = State.Playing;
+        }
+    }
+
+    /// <summary>
+    /// Resolves every pending DeletePlayerChosenThenSelf request queued up during this
+    /// attempt's scoring pass, one at a time - opens deckStatsPanel in its special
+    /// deletion mode (see DeckStatsPanel.ShowForDeletion) and waits for the player to
+    /// actually click a card before moving on to the next pending request, if any. The
+    /// requesting additive has already deleted ITSELF synchronously during scoring (see
+    /// AdditiveInstance.RequestPlayerChosenDeletion) - this only handles the separate,
+    /// player-chosen additional deletion.
+    /// </summary>
+    private IEnumerator ResolvePlayerDeletions()
+    {
+        while (_pendingPlayerDeletions.Count > 0)
+        {
+            var requester = _pendingPlayerDeletions[0];
+            _pendingPlayerDeletions.RemoveAt(0);
+
+            if (deckStatsPanel == null)
+            {
+                Debug.LogWarning($"[RoundManager] '{name}' has no deckStatsPanel assigned - can't let the " +
+                                  $"player choose a card to delete for '{requester?.Name}'. Skipping.", this);
+                continue;
+            }
+            if (_ownedAdditives.Count == 0)
+            {
+                Debug.Log($"[RoundManager] '{requester?.Name}' requested a player-chosen deletion, but the " +
+                          "collection is empty - nothing left to delete. Skipping.", this);
+                continue;
+            }
+
+            AdditiveInstance chosen = null;
+            bool done = false;
+            deckStatsPanel.ShowForDeletion(picked =>
+            {
+                chosen = picked;
+                done = true;
+            },
+            onSkipped: () =>
+            {
+                DeletionSkips++;
+                Debug.Log($"[RoundManager] Card deletion skipped - {DeletionSkips} total this run. " +
+                          "Shop rarity permanently up a little.");
+                done = true;
+            });
+
+            yield return new WaitUntil(() => done);
+
+            if (chosen != null)
+                _ownedAdditives.Remove(chosen);
         }
     }
 
     private void HandleRoundSuccess(int attemptsRemaining)
     {
+        popularity?.OnRoundEnded(); // flavors recover a little between rounds
+        _lastWonRound = RoundNumber;   // Percent Of Last Score mode bases the next requirement on this
+        _lastWonScore = CumulativeScore;
+        ApplyScoreScaling();        // Gradual Increase mode: a big overshoot makes future rounds a little harder
+        if (scoreScaling == ScoreScalingMode.PercentOfLastScore)
+            Debug.Log($"[RoundManager] Scored {CumulativeScore:0} - next round needs {NextRoundRequirement} " +
+                      $"({percentOfLastScore:P0} of that, +{addedPercentOfNormal:P0} of the normal {NormalRequirementForRound(RoundNumber + 1):0} if that's below normal).");
         CurrentState = State.RoundWon;
         OnRoundSucceeded?.Invoke();
 
         // Efficiency: 1.0 if won on the first attempt, 0.0 if it took every attempt.
         float efficiency = (float)attemptsRemaining / Mathf.Max(EffectiveMaxAttempts - 1, 1);
-        bottle.ClearToBelt(belt); // leftover unused additives return; belt is cleared on next spawn anyway
+        bottle.ClearAndDestroy(); // any cards left in the cup are discarded; belt is cleared/redrawn on the next round
 
-        if (RoundNumber % modifierEveryNRounds == 0)
+        bool isModifierRound = RoundNumber % modifierEveryNRounds == 0;
+        Debug.Log($"[RoundManager] Round {RoundNumber} won (efficiency {efficiency:0.00}). " +
+                  $"Going to {(isModifierRound ? "MODIFIER CHOICE" : "SHOP")} next.");
+
+        if (isModifierRound)
         {
             CurrentState = State.ModifierChoice;
-            var offers = modifierManager.GenerateOffers();
+            var offers = modifierManager.GenerateOffers(_skipStreak);
+            Debug.Log($"[RoundManager] ModifierManager.GenerateOffers() returned {offers.Count} offer(s). Invoking OnModifierOffersReady.");
             OnModifierOffersReady?.Invoke(offers);
         }
         else
@@ -215,7 +631,9 @@ public class RoundManager : MonoBehaviour
     private void OpenShop(float efficiency)
     {
         CurrentState = State.Shopping;
-        var offers = shopManager.GenerateOffers(efficiency);
+        RerollsThisShop = 0;
+        var offers = shopManager.GenerateOffers(efficiency, ShopSkips, DeletionSkips);
+        Debug.Log($"[RoundManager] ShopManager.GenerateOffers() returned {offers.Count} offer(s). Invoking OnShopOffersReady.");
         OnShopOffersReady?.Invoke(offers);
     }
 
@@ -224,19 +642,72 @@ public class RoundManager : MonoBehaviour
     /// <summary>Call from your modifier-choice UI when the player picks one (or null/skip).</summary>
     public void OnModifierChosen(ModifierData chosen)
     {
+        Debug.Log($"[RoundManager] OnModifierChosen: {(chosen != null ? chosen.modifierName : "skipped")}. Opening shop next.");
+
         if (chosen != null)
-            modifierManager.ApplyModifier(chosen, _ownedAdditives);
+        {
+            _skipStreak = 0; // picking something resets the streak - the payoff for banking skips
+            var result = modifierManager.ApplyModifier(chosen, _ownedAdditives, shopManager != null ? shopManager.additivePool : null);
+            syrupFX?.ShowSyrupApplied(chosen, result);
+        }
+        else
+        {
+            _skipStreak++;
+            Debug.Log($"[RoundManager] Shop/modifier skip streak now {_skipStreak} - offers are skewed further toward rarer tiers.");
+        }
 
         OpenShop(_pendingEfficiency);
+        musicManager.NextTrack();
     }
 
+    public void TriggerNextTrack()
+    {
+        musicManager.NextTrack();
+    }
     /// <summary>Call from your shop UI when the player picks one (or null/skip).</summary>
     public void OnShopPickChosen(AdditiveData chosen)
     {
+        Debug.Log($"[RoundManager] OnShopPickChosen: {(chosen != null ? chosen.additiveName : "skipped")}. " +
+                  $"Advancing to round {RoundNumber + 1}.");
+
         if (chosen != null)
+        {
+            _skipStreak = 0; // picking something resets the streak - the payoff for banking skips
             _ownedAdditives.Add(new AdditiveInstance(chosen));
+        }
+        else
+        {
+            // Skipping the shop is a permanent investment: better shop odds for the rest of the run,
+            // and an extra offer slot every few skips (see ShopManager).
+            ShopSkips++;
+            _skipStreak++; // syrup offers still use the old streak (resets when something is picked)
+            Debug.Log($"[RoundManager] Shop skipped - {ShopSkips} total skip(s) this run. Shop rarity permanently up; " +
+                      $"{(shopManager != null ? shopManager.OfferCountFor(ShopSkips) : 0)} offer slot(s) from now on.");
+        }
 
         RoundNumber++;
         BeginRound();
+    }
+
+    /// <summary>Skip button: closes the shop, permanently improves it, and starts the next round.</summary>
+    public void SkipShop() => OnShopPickChosen(null);
+
+    /// <summary>
+    /// Reroll button: new shop offers right now, at the cost of permanently raising every future
+    /// round's score requirement by rerollRequirementGrowth (a smaller step than a round).
+    /// Returns false if rerolling isn't allowed right now.
+    /// </summary>
+    public bool RerollShop()
+    {
+        if (!CanReroll || shopManager == null) return false;
+
+        RerollsThisShop++;
+        ShopRerolls++;
+        RerollRequirementMultiplier *= Mathf.Max(1f, rerollRequirementGrowth);
+
+        var offers = shopManager.GenerateOffers(_pendingEfficiency, ShopSkips, DeletionSkips);
+        Debug.Log($"[RoundManager] Shop rerolled ({RerollsThisShop} this shop). Next round now needs {NextRoundRequirement}.");
+        ShopRerolled?.Invoke(offers);
+        return true;
     }
 }
